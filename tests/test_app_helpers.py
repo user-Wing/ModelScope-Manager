@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import SettingCardGroup
 
 import modelscope_manager.app as app_module
+import modelscope_manager.app_workers as app_workers_module
 from modelscope_manager.app import (
     CopyThread, DeleteThread, MainWindow, ModelScopeLoginDialog, PathBreadcrumb, RelocateThread,
     RepositoryList, RepositoryTree, ThumbnailThread,
@@ -145,8 +146,8 @@ class AppHelperTests(unittest.TestCase):
             def complete_thumbnail(command, **_kwargs):
                 Path(command[-1]).write_bytes(b"jpeg")
 
-            with patch.object(app_module, "THUMBNAIL_CACHE_DIR", cache), patch.object(
-                app_module.subprocess, "run", side_effect=complete_thumbnail
+            with patch.object(app_workers_module, "THUMBNAIL_CACHE_DIR", cache), patch.object(
+                app_workers_module.subprocess, "run", side_effect=complete_thumbnail
             ) as run:
                 result = thread._create_thumbnail(thread.entries[0], "ffmpeg.exe")
 
@@ -253,9 +254,9 @@ class AppHelperTests(unittest.TestCase):
         thread = DeleteThread(object(), repo, paths)
         thread.completed.connect(results.append)
         with (
-            patch.object(app_module, "delete_repository_files", side_effect=RuntimeError("timeout")) as batch,
-            patch.object(app_module, "list_repository_file_paths", return_value=["folder/deep/b.txt"]),
-            patch.object(app_module, "delete_repository_file") as single,
+            patch.object(app_workers_module, "delete_repository_files", side_effect=RuntimeError("timeout")) as batch,
+            patch.object(app_workers_module, "list_repository_file_paths", return_value=["folder/deep/b.txt"]),
+            patch.object(app_workers_module, "delete_repository_file") as single,
         ):
             thread.run()
 
@@ -503,7 +504,7 @@ class AppHelperTests(unittest.TestCase):
                     {group.titleLabel.text() for group in window.settings_page.findChildren(SettingCardGroup)},
                     {
                         "基本设置", "个性化", "账号设置", "下载设置", "WebDAV 设置",
-                        "播放设置", "索引和预览",
+                        "播放设置", "索引和预览", "资源监控",
                     },
                 )
 

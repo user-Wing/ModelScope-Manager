@@ -17,7 +17,7 @@ class FakeUploadService:
         self.callback = callback
         yield
 
-    def upload_file(self, repo, path, target):
+    def upload_file_as(self, repo, path, target):
         self.calls.append((repo, path, target))
         self.callback(path.stat().st_size)
 
@@ -35,8 +35,8 @@ class UploadThreadTests(unittest.TestCase):
             )
             worker.item_done.connect(lambda *result: completed.append(result))
             worker.run()
-        self.assertEqual(service.calls[0][2], "one/two")
-        self.assertEqual(completed, [(str(path), True, "上传完成")])
+        self.assertEqual(service.calls[0][2], "one/two/example.txt")
+        self.assertEqual(completed, [(str(path), True, "上传完成：1 个文件已分别提交")])
 
     def test_cancelled_upload_does_not_start_the_sdk_operation(self):
         with tempfile.TemporaryDirectory() as temporary:
