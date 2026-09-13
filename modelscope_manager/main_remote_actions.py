@@ -30,19 +30,25 @@ class RemoteActionsMixin:
     def _copy_remote_link(
         self, entry: RemoteEntry, service: ModelScopeService, repo: Repository
     ) -> None:
+        self._copy_remote_links([entry], service, repo)
+
+    def _copy_remote_links(
+        self, selected: list[RemoteEntry], service: ModelScopeService, repo: Repository,
+    ) -> None:
         try:
-            if entry.is_dir:
-                link = self._repository_web_url(repo, entry.path)
-            else:
-                public = repository_is_public(repo, service.token)
-                link = repository_file_url(repo, entry.path, public)
+            public = repository_is_public(repo, service.token)
+            links = [
+                self._repository_web_url(repo, entry.path)
+                if entry.is_dir else repository_file_url(repo, entry.path, public)
+                for entry in selected
+            ]
         except Exception as exc:
             QMessageBox.warning(self, self._t("复制链接失败"), str(exc))
             return
-        QApplication.clipboard().setText(link)
-        message = "文件夹链接已复制" if entry.is_dir else "文件直链已复制"
-        self._log(f"{message}：{entry.path or '/'}")
-        if not entry.is_dir and not public:
+        QApplication.clipboard().setText("\n".join(links))
+        message = "链接已复制" if len(selected) > 1 else ("文件夹链接已复制" if selected[0].is_dir else "文件直链已复制")
+        self._log(f"{message}：{len(selected)} 项")
+        if any(not entry.is_dir for entry in selected) and not public:
             QMessageBox.information(
                 self,
                 self._t("私有资源 API 直链"),
@@ -51,6 +57,26 @@ class RemoteActionsMixin:
             self.repo_heading.setText(self._t("私有资源 API 直链已复制"))
         else:
             self.repo_heading.setText(self._t(message))
+
+    @staticmethod
+    def _context_selected_entries(view: QWidget, position, clicked: RemoteEntry) -> list[RemoteEntry]:
+        item = view.itemAt(position)
+        selected_items = view.selectedItems() if hasattr(view, "selectedItems") else []
+        selected: list[RemoteEntry] = []
+        for selected_item in selected_items:
+            value = (
+                selected_item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(selected_item, QListWidgetItem)
+                else selected_item.data(0, Qt.ItemDataRole.UserRole)
+            )
+            if isinstance(value, RemoteEntry):
+                selected.append(value)
+        if not any(value.path == clicked.path for value in selected):
+            view.clearSelection()
+            if item is not None:
+                item.setSelected(True)
+            return [clicked]
+        return selected or [clicked]
 
     def _remote_context_menu(self, position) -> None:
         item = self.remote_tree.itemAt(position)
@@ -90,16 +116,18 @@ class RemoteActionsMixin:
         entries: list[RemoteEntry],
         tag_account_id: str,
     ) -> None:
+        selected = self._context_selected_entries(tree, position, entry)
+        multiple = len(selected) > 1
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
-        link_action = menu.addAction(self._t("复制链接" if entry.is_dir else "复制直链"))
+        link_action = menu.addAction(self._t("复制链接" if multiple or entry.is_dir else "复制直链"))
         copy_action = menu.addAction(self._t("复制"))
-        paste_action = menu.addAction(self._t("粘贴")) if self.copy_source and not self.selected_repo_public else None
-        paste_move_action = menu.addAction(self._t("粘贴移动")) if self.move_source and not self.selected_repo_public else None
+        paste_action = menu.addAction(self._t("粘贴")) if self.copy_source and not self.selected_repo_public and not multiple else None
+        paste_move_action = menu.addAction(self._t("粘贴移动")) if self.move_source and not self.selected_repo_public and not multiple else None
         download_action = menu.addAction(self._t("添加到下载队列"))
         builtin_action = None
         player_actions: dict[QAction, dict[str, str]] = {}
-        if not entry.is_dir and Path(entry.path).suffix.lower() in MEDIA_EXTENSIONS | IMAGE_EXTENSIONS:
+        if not multiple and not entry.is_dir and Path(entry.path).suffix.lower() in MEDIA_EXTENSIONS | IMAGE_EXTENSIONS:
             if self.builtin_player_enabled.isChecked():
                 builtin_action = menu.addAction(self._t("使用本地 PotPlayer 打开"))
             player_menu = menu.addMenu(self._t("使用第三方播放器打开"))
@@ -108,7 +136,13 @@ class RemoteActionsMixin:
                 action = player_menu.addAction(name)
                 player_actions[action] = player
         tag_menu = menu.addMenu(self._t("标签"))
-        assigned_tags = set(self.account_store.tags_for_entry(tag_account_id, repo.repo_type, repo.repo_id, entry.path))
+        assigned_by_path = {
+            value.path: set(self.account_store.tags_for_entry(
+                tag_account_id, repo.repo_type, repo.repo_id, value.path,
+            ))
+            for value in selected
+        }
+        assigned_tags = set.intersection(*assigned_by_path.values()) if assigned_by_path else set()
         tag_actions: dict[QAction, str] = {}
         for tag in self.account_store.all_tags():
             action = tag_menu.addAction(tag)
@@ -126,12 +160,15 @@ class RemoteActionsMixin:
             for action in (delete_action, move_action, rename_action):
                 action.setEnabled(False)
                 action.setToolTip(tooltip)
+        elif multiple:
+            rename_action.setEnabled(False)
+            rename_action.setToolTip("多选时不能重命名")
         chosen = menu.exec(tree.viewport().mapToGlobal(position))
         if chosen is link_action:
-            self._copy_remote_link(entry, service, repo)
+            self._copy_remote_links(selected, service, repo)
         elif chosen is copy_action:
-            self.copy_source = (service, repo, list(entries), entry)
-            self._log(f"已复制：{entry.path or '/'}；请选择可写目录后右键粘贴")
+            self.copy_source = (service, repo, list(entries), list(selected))
+            self._log(f"已复制 {len(selected)} 项；请选择可写目录后右键粘贴")
         elif paste_action is not None and chosen is paste_action:
             destination = entry.path if entry.is_dir else entry.path.rsplit("/", 1)[0] if "/" in entry.path else ""
             self._paste_remote_copy(service, repo, destination)
@@ -139,24 +176,35 @@ class RemoteActionsMixin:
             destination = entry.path if entry.is_dir else entry.path.rsplit("/", 1)[0] if "/" in entry.path else ""
             self._paste_remote_move(tag_account_id, service, repo, destination)
         elif chosen is download_action:
-            self.add_remote_download(entry, service, repo, entries)
+            for value in selected:
+                self.add_remote_download(value, service, repo, entries)
         elif builtin_action is not None and chosen is builtin_action:
             self.open_builtin_remote(entry, service, repo)
         elif chosen in player_actions:
             self.open_external_player(entry, service, repo, player_actions[chosen])
         elif chosen in tag_actions:
             tag = tag_actions[chosen]
-            tags = assigned_tags ^ {tag}
-            self._save_entry_tags(tag_account_id, repo, entry.path, list(tags))
+            remove = tag in assigned_tags
+            for value in selected:
+                tags = assigned_by_path[value.path]
+                if remove:
+                    tags.discard(tag)
+                else:
+                    tags.add(tag)
+                self._save_entry_tags(tag_account_id, repo, value.path, list(tags))
         elif chosen is new_tag_action:
             name, accepted = QInputDialog.getText(self, "新建标签", "标签名称：")
             if accepted and name.strip():
-                self._save_entry_tags(tag_account_id, repo, entry.path, list(assigned_tags) + [name])
+                for value in selected:
+                    self._save_entry_tags(
+                        tag_account_id, repo, value.path,
+                        list(assigned_by_path[value.path]) + [name],
+                    )
         elif chosen is delete_action:
-            self._delete_remote_entry(tag_account_id, repo, entry, entries)
+            self._delete_remote_entries(tag_account_id, repo, selected, entries)
         elif chosen is move_action:
-            self.move_source = (tag_account_id, service, repo, list(entries), entry)
-            self._log(f"已选择移动：{entry.path}；请选择目标目录后右键粘贴移动")
+            self.move_source = (tag_account_id, service, repo, list(entries), list(selected))
+            self._log(f"已选择移动 {len(selected)} 项；请选择目标目录后右键粘贴移动")
         elif chosen is rename_action:
             self._rename_remote_entry(tag_account_id, service, repo, entry, entries)
 
@@ -195,19 +243,31 @@ class RemoteActionsMixin:
     def _delete_remote_entry(
         self, account_key: str, repo: Repository, entry: RemoteEntry, entries: list[RemoteEntry],
     ) -> None:
+        self._delete_remote_entries(account_key, repo, [entry], entries)
+
+    def _delete_remote_entries(
+        self, account_key: str, repo: Repository,
+        selected: list[RemoteEntry], entries: list[RemoteEntry],
+    ) -> None:
         session = self._web_session_for_key(account_key)
         if session is None:
             QMessageBox.information(self, self._t("需要在线登录"), self._t("转到设置页面添加账号。"))
             return
-        paths = self._entry_file_paths(entry, entries)
+        paths = sorted({
+            path
+            for entry in selected
+            for path in self._entry_file_paths(entry, entries)
+        }, reverse=True)
         if not paths:
             QMessageBox.information(self, self._t("删除"), self._t("文件夹中没有可删除的文件。"))
             return
         answer = QMessageBox.warning(
             self,
             self._t("确认删除"),
-            self._tf("此操作不可逆，确定删除“{path}”？", path=entry.path)
-            + (self._tf("\n将递归删除 {count} 个文件。", count=len(paths)) if entry.is_dir else ""),
+            self._tf(
+                "此操作不可逆，确定删除选中的 {selected} 项（共 {count} 个文件）？",
+                selected=len(selected), count=len(paths),
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -215,14 +275,14 @@ class RemoteActionsMixin:
             return
         self.delete_task = DeleteThread(session, repo, paths, self)
         self.delete_task.completed.connect(
-            lambda result, key=account_key, value=repo, path=entry.path: self._remote_delete_completed(
-                key, value, result, path,
+            lambda result, key=account_key, value=repo, selected_paths=[item.path for item in selected]: self._remote_delete_completed(
+                key, value, result, selected_paths,
             )
         )
         self.delete_task.failed.connect(lambda error: QMessageBox.warning(self, self._t("删除失败"), error))
         self.delete_task.finished.connect(self.delete_task.deleteLater)
         self.delete_task.start()
-        self._log(f"开始删除：{repo.repo_id}/{entry.path} · {len(paths)} 个文件")
+        self._log(f"开始删除：{repo.repo_id} · {len(selected)} 项 / {len(paths)} 个文件")
 
     def _cached_remote_entries(self, account_key: str, repo: Repository) -> list[RemoteEntry]:
         if self.selected_repo == repo and (
@@ -270,12 +330,13 @@ class RemoteActionsMixin:
             self._files_loaded(updated, persist=False)
 
     def _remote_delete_completed(
-        self, account_key: str, repo: Repository, result: dict, selected_path: str = "",
+        self, account_key: str, repo: Repository, result: dict, selected_path: str | list[str] = "",
     ) -> None:
         self.delete_task = None
         deleted = list(result.get("deleted", []))
         failures = dict(result.get("failures", {}))
-        remove_prefixes = [selected_path] if selected_path and not failures else []
+        selected_paths = [selected_path] if isinstance(selected_path, str) else selected_path
+        remove_prefixes = [path for path in selected_paths if path] if not failures else []
         self._apply_local_remote_changes(
             account_key, repo, removed=deleted, removed_prefixes=remove_prefixes,
         )
@@ -321,7 +382,7 @@ class RemoteActionsMixin:
     ) -> None:
         if not self.move_source:
             return
-        source_key, source_service, source_repo, source_entries, selected = self.move_source
+        source_key, source_service, source_repo, source_entries, selected_items = self.move_source
         if self._web_session_for_key(source_key) is None:
             QMessageBox.information(self, self._t("需要在线登录"), self._t("转到设置页面添加账号。"))
             return
@@ -331,18 +392,20 @@ class RemoteActionsMixin:
                 self, self._t("需要 Token 账户"), self._t("请先添加可访问目标仓库的 Token 账户；上传不会使用网页登录接口。"),
             )
             return
-        target = normalize_remote_path(destination_folder, Path(selected.path).name)
-        if source_repo == destination_repo and source_key == destination_key:
-            source_path = selected.path.strip("/")
-            if target == source_path:
-                QMessageBox.information(self, self._t("移动"), self._t("目标路径与原路径相同。"))
+        mappings: dict[str, str] = {}
+        for selected in selected_items:
+            target = normalize_remote_path(destination_folder, Path(selected.path).name)
+            if source_repo == destination_repo and source_key == destination_key:
+                source_path = selected.path.strip("/")
+                if target == source_path:
+                    QMessageBox.information(self, self._t("移动"), self._t("目标路径与原路径相同。"))
+                    return
+                if selected.is_dir and (destination_folder == source_path or destination_folder.startswith(source_path + "/")):
+                    QMessageBox.warning(self, self._t("移动"), self._t("不能把文件夹移动到其自身或子目录中。"))
+                    return
+            if not self._confirm_relocate_threshold(selected, source_entries, "移动"):
                 return
-            if selected.is_dir and (destination_folder == source_path or destination_folder.startswith(source_path + "/")):
-                QMessageBox.warning(self, self._t("移动"), self._t("不能把文件夹移动到其自身或子目录中。"))
-                return
-        if not self._confirm_relocate_threshold(selected, source_entries, "移动"):
-            return
-        mappings = self._relocate_mappings(selected, source_entries, target)
+            mappings.update(self._relocate_mappings(selected, source_entries, target))
         self._start_relocate(
             source_key, source_service, source_repo, destination_key,
             upload_service, destination_repo, source_entries, mappings,
@@ -449,19 +512,22 @@ class RemoteActionsMixin:
     def _paste_remote_copy(self, destination_service: ModelScopeService, destination_repo: Repository, destination_folder: str) -> None:
         if not self.copy_source or self.selected_repo_public:
             return
-        source_service, source_repo, source_entries, selected = self.copy_source
+        source_service, source_repo, source_entries, selected_items = self.copy_source
         upload_service = self._token_service_for_repo(destination_repo)
         if upload_service is None:
             QMessageBox.information(
                 self, self._t("需要 Token 账户"), self._t("请先添加可访问目标仓库的 Token 账户；上传不会使用网页登录接口。"),
             )
             return
-        if selected.is_dir:
-            total_size = self.folder_index.update_folder(
-                source_repo, selected.path, source_entries, repository_is_public(source_repo, source_service.token),
-            )
-        else:
-            total_size = selected.size
+        total_size = 0
+        for selected in selected_items:
+            if selected.is_dir:
+                total_size += self.folder_index.update_folder(
+                    source_repo, selected.path, source_entries,
+                    repository_is_public(source_repo, source_service.token),
+                )
+            else:
+                total_size += selected.size
         if total_size > self._copy_threshold_bytes():
             answer = QMessageBox.question(
                 self, "复制较大资源",
@@ -471,14 +537,14 @@ class RemoteActionsMixin:
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.copy_task = CopyThread(
-            source_service, source_repo, source_entries, selected,
+            source_service, source_repo, source_entries, selected_items,
             upload_service, destination_repo, destination_folder, self,
         )
         self.copy_task.completed.connect(self._remote_copy_completed)
         self.copy_task.failed.connect(lambda error: QMessageBox.warning(self, self._t("复制失败"), error))
         self.copy_task.finished.connect(self.copy_task.deleteLater)
         self.copy_task.start()
-        self._log(f"开始后台复制：{selected.path or '/'} → {destination_repo.repo_id}/{destination_folder}")
+        self._log(f"开始后台复制：{len(selected_items)} 项 → {destination_repo.repo_id}/{destination_folder}")
 
     def _remote_copy_completed(self, ok: int, failed: int) -> None:
         self.copy_task = None
@@ -552,7 +618,7 @@ class RemoteActionsMixin:
             QMessageBox.information(self, self._t("请选择仓库"), self._t("请先在左侧选择目标仓库。"))
             return
         if self.task and self.task.isRunning() and not isinstance(self.task, UploadThread):
-            QMessageBox.information(self, self._t("传输进行中"), self._t("已有任务正在运行，请完成后再拖放上传。"))
+            QMessageBox.information(self, self._t("传输进行中"), self._t("已有任务正在运行，请完成后再添加上传。"))
             return
         if (
             self.upload_session_repo
@@ -560,7 +626,6 @@ class RemoteActionsMixin:
         ):
             QMessageBox.information(self, self._t("传输进行中"), self._t("请在当前上传队列完成后再切换目标仓库。"))
             return
-        self.target_edit.setText(directory.path)
         total_size = local_paths_size(raw_paths)
         added = self.add_paths(raw_paths, directory.path)
         if not added:
@@ -572,7 +637,7 @@ class RemoteActionsMixin:
                 self,
                 self._t("大文件上传"),
                 self._tf(
-                    "拖放内容总大小约为 {size}，已超过 {threshold} MB。是否跳转到传输列表监控？",
+                    "上传内容总大小约为 {size}，已超过 {threshold} MB。是否跳转到传输列表监控？",
                     size=format_size(total_size),
                     threshold=self.drop_upload_threshold_mb.value(),
                 ),
@@ -581,6 +646,6 @@ class RemoteActionsMixin:
             )
             if monitor == QMessageBox.StandardButton.Yes:
                 self._navigate(1)
-        self._log(f"拖放上传到 /{directory.path}")
+        self._log(f"上传到 /{directory.path}")
         if not (self.task and self.task.isRunning()):
             QTimer.singleShot(0, self.start_upload)

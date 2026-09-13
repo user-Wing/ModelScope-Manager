@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidgetItem, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import quote
@@ -14,6 +12,7 @@ from .app_helpers import MEDIA_EXTENSIONS, PUBLIC_ACCOUNT_ID, format_size, local
 from .app_workers import CopyThread, DeleteThread, RelocateThread, TaskThread, UploadThread
 from .database import AccountRecord, IndexedEntry, classify_file, everything_search_match
 from .image_bed import IMAGE_EXTENSIONS
+from .fluent_ui import CleanComboBox
 from .service import ModelScopeService, ModelScopeWebService, RemoteEntry, Repository, normalize_remote_path, parse_modelscope_repository_url, repository_directories
 from .web_session import ModelScopeWebSession, delete_repository_file
 
@@ -21,7 +20,206 @@ from .web_session import ModelScopeWebSession, delete_repository_file
 class RepositorySearchMixin:
     """本地索引搜索与公共仓库搜索行为。"""
 
+    @staticmethod
+    def _indexed_search_sort_key(record: IndexedEntry, column: int) -> tuple:
+        values = (
+            record.name.casefold(), record.file_type.casefold(), record.size,
+            record.repo_id.casefold(), record.path.casefold(),
+        )
+        return values[column], record.path.casefold()
+
+    def show_resource_search(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("搜索已索引资源")
+        dialog.resize(820, 520)
+        layout = QVBoxLayout(dialog)
+        filters = QHBoxLayout()
+        scope = CleanComboBox()
+        scope.addItem("全部仓库", userData="all")
+        scope.addItem("当前账户", userData="account")
+        scope.addItem("当前仓库", userData="repository")
+        scope.addItem("当前目录", userData="directory")
+        kind = CleanComboBox()
+        kind.addItem("全部类型", userData="all")
+        kind.addItem("视频", userData="video")
+        kind.addItem("图片", userData="image")
+        kind.addItem("文档", userData="document")
+        kind.addItem("压缩包", userData="archive")
+        tag = CleanComboBox()
+        tag.addItem("全部标签", userData="")
+        for value in self.account_store.all_tags():
+            tag.addItem(value, userData=value)
+        query = QLineEdit()
+        query.setPlaceholderText("高级搜索：路径片段 文件名前段 后段")
+        filters.addWidget(scope)
+        filters.addWidget(kind)
+        filters.addWidget(tag)
+        filters.addWidget(query, 1)
+        layout.addLayout(filters)
+        result_count = QLabel("正在搜索本地索引…")
+        layout.addWidget(result_count)
+        results = QTreeWidget()
+        results.setHeaderLabels(["名称", "类型", "大小", "仓库", "路径"])
+        results.setRootIsDecorated(False)
+        results.setUniformRowHeights(True)
+        header = results.header()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        header.setStretchLastSection(True)
+        layout.addWidget(results, 1)
+        sort_column = 0
+        sort_order = Qt.SortOrder.AscendingOrder
+        search_generation = 0
+        search_worker: TaskThread | None = None
+        search_pending = False
+        closing = False
+        cached_records: list[IndexedEntry] = []
+        render_index = 0
+        search_timer = QTimer(dialog)
+        search_timer.setSingleShot(True)
+        search_timer.setInterval(220)
+        render_timer = QTimer(dialog)
+        render_timer.setInterval(0)
+
+        def show_result_menu(position) -> None:
+            item = results.itemAt(position)
+            record = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+            if not isinstance(record, IndexedEntry):
+                return
+            service = ModelScopeService("", require_token=False) if record.account_id == PUBLIC_ACCOUNT_ID else self.account_services.get(record.account_id)
+            if service is None:
+                return
+            repo = next((candidate for candidate in self.account_repositories.get(record.account_id, [])
+                         if candidate.repo_type == record.repo_type and candidate.repo_id == record.repo_id), None)
+            repo = repo or Repository(record.repo_id, record.repo_type, "public" if record.account_id == PUBLIC_ACCOUNT_ID else "")
+            entries = [RemoteEntry(value.path, value.size, value.sha256, value.is_dir) for value in self.account_store.repository_entries(record.account_id, record.repo_type, record.repo_id)]
+            entry = RemoteEntry(record.path, record.size, record.sha256, record.is_dir)
+            self._show_remote_menu(results, position, entry, service, repo, entries or [entry], record.account_id)
+
+        def search_parameters() -> tuple[str, str, str | None, str | None, str | None, str | None, str]:
+            account_id = repo_type = repo_id = path_prefix = None
+            selected_scope = str(scope.currentData())
+            if selected_scope != "all":
+                account_id = PUBLIC_ACCOUNT_ID if self.selected_repo_public else self.active_account_id
+            if selected_scope in {"repository", "directory"} and self.selected_repo:
+                repo_type, repo_id = self.selected_repo.repo_type, self.selected_repo.repo_id
+            if selected_scope == "directory":
+                path_prefix = self.current_directory_path
+            return (
+                query.text().strip(), str(kind.currentData()), account_id, repo_type, repo_id,
+                path_prefix, str(tag.currentData() or ""),
+            )
+
+        def sort_key(record: IndexedEntry):
+            return self._indexed_search_sort_key(record, sort_column)
+
+        def render_next_chunk() -> None:
+            nonlocal render_index
+            records = cached_records[render_index:render_index + 400]
+            if not records:
+                render_timer.stop()
+                return
+            items = []
+            for record in records:
+                item = QTreeWidgetItem([record.name, record.file_type, format_size(record.size), record.repo_id, record.path])
+                item.setData(0, Qt.ItemDataRole.UserRole, record)
+                items.append(item)
+            results.setUpdatesEnabled(False)
+            results.addTopLevelItems(items)
+            results.setUpdatesEnabled(True)
+            render_index += len(records)
+            if render_index >= len(cached_records):
+                render_timer.stop()
+                results.viewport().update()
+
+        def render_results() -> None:
+            nonlocal render_index
+            render_timer.stop()
+            cached_records.sort(
+                key=sort_key,
+                reverse=sort_order == Qt.SortOrder.DescendingOrder,
+            )
+            results.clear()
+            render_index = 0
+            result_count.setText(f"搜索结果：{len(cached_records)} 项")
+            if cached_records:
+                render_timer.start()
+
+        def search_ready(records: list[IndexedEntry], generation: int) -> None:
+            nonlocal cached_records
+            if generation != search_generation or closing:
+                return
+            cached_records = records
+            render_results()
+
+        def search_failed(error: str, generation: int) -> None:
+            if generation == search_generation and not closing:
+                result_count.setText(f"搜索失败：{error}")
+
+        def search_finished(worker: TaskThread) -> None:
+            nonlocal search_worker, search_pending
+            if search_worker is worker:
+                search_worker = None
+            if search_pending and not closing:
+                search_pending = False
+                QTimer.singleShot(0, start_search)
+
+        def start_search() -> None:
+            nonlocal search_worker, search_pending
+            if search_worker and search_worker.isRunning():
+                search_pending = True
+                return
+            parameters = search_parameters()
+            generation = search_generation
+            worker = TaskThread(lambda: self.account_store.search_entries(*parameters), dialog)
+            worker.succeeded.connect(lambda records, value=generation: search_ready(records, value))
+            worker.failed.connect(lambda error, value=generation: search_failed(error, value))
+            worker.finished.connect(lambda value=worker: search_finished(value))
+            worker.finished.connect(worker.deleteLater)
+            search_worker = worker
+            search_pending = False
+            result_count.setText("正在搜索本地索引…")
+            worker.start()
+
+        def schedule_search() -> None:
+            nonlocal search_generation
+            search_generation += 1
+            render_timer.stop()
+            search_timer.start()
+
+        def submit_search() -> None:
+            search_timer.stop()
+            start_search()
+
+        def change_sort(column: int) -> None:
+            nonlocal sort_column, sort_order
+            sort_order = Qt.SortOrder.DescendingOrder if column == sort_column and sort_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+            sort_column = column
+            header.setSortIndicator(column, sort_order)
+            render_results()
+
+        for control in (scope, kind, tag):
+            control.currentIndexChanged.connect(schedule_search)
+        query.textChanged.connect(schedule_search)
+        query.returnPressed.connect(submit_search)
+        results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        results.customContextMenuRequested.connect(show_result_menu)
+        header.sectionClicked.connect(change_sort)
+        search_timer.timeout.connect(start_search)
+        render_timer.timeout.connect(render_next_chunk)
+        schedule_search()
+        dialog.exec()
+        closing = True
+        search_timer.stop()
+        render_timer.stop()
+        if search_worker and search_worker.isRunning():
+            search_worker.requestInterruption()
+            search_worker.wait(3000)
+
     def _schedule_global_search(self) -> None:
+        self.global_search_generation += 1
+        self.global_search_render_timer.stop()
         self.resource_search_timer.start()
 
     def _refresh_tag_filter(self) -> None:
@@ -44,6 +242,7 @@ class RepositorySearchMixin:
         self.remote_thumbnail_list.setVisible(not visible and self.resource_view_mode == "thumbnails")
         self.global_search_tree.setVisible(visible)
         self.global_search_label.setVisible(visible)
+        self._update_remote_selection_actions()
 
     def _perform_global_search(self) -> None:
         query = self.resource_search_edit.text().strip()
@@ -78,13 +277,47 @@ class RepositorySearchMixin:
                 self.global_search_label.setText(self._t("请先选择搜索仓库"))
                 self._set_global_search_visible(True)
                 return
-        self.global_search_results = self.account_store.search_entries(
-            query, file_type, account_id, repo_type, repo_id, path_prefix, tag_name
+        if self.global_search_task and self.global_search_task.isRunning():
+            self.global_search_pending = True
+            return
+        generation = self.global_search_generation
+        worker = TaskThread(
+            lambda: self.account_store.search_entries(
+                query, file_type, account_id, repo_type, repo_id, path_prefix, tag_name,
+            ),
+            self,
         )
+        worker.succeeded.connect(
+            lambda records, value=generation: self._global_search_ready(records, value)
+        )
+        worker.failed.connect(lambda error: self._log(f"索引搜索失败：{error}"))
+        worker.finished.connect(lambda value=worker: self._global_search_finished(value))
+        worker.finished.connect(worker.deleteLater)
+        self.global_search_task = worker
+        self.global_search_pending = False
+        self.global_search_label.setText(self._t("正在搜索本地索引…"))
+        self._set_global_search_visible(True)
+        worker.start()
+
+    def _global_search_finished(self, worker: TaskThread) -> None:
+        if self.global_search_task is worker:
+            self.global_search_task = None
+        if self.global_search_pending:
+            self.global_search_pending = False
+            QTimer.singleShot(0, self._perform_global_search)
+
+    def _global_search_ready(self, records: list[IndexedEntry], generation: int) -> None:
+        if generation != self.global_search_generation:
+            return
+        self.global_search_results = records
+        self._start_global_search_render()
+
+    def _start_global_search_render(self) -> None:
         account_labels = {account.account_id: account.label for account in self.accounts}
         account_labels.update({self._web_account_key(account.account_id): account.label for account in self.web_accounts})
         account_labels[PUBLIC_ACCOUNT_ID] = "Public"
-        type_labels = {
+        self._global_search_account_labels = account_labels
+        self._global_search_type_labels = {
             "video": self._t("视频"), "image": self._t("图片"),
             "document": self._t("文档"), "archive": self._t("压缩包"),
             "other": self._t("其他"),
@@ -94,30 +327,41 @@ class RepositorySearchMixin:
             reverse=self.global_search_sort_order == Qt.SortOrder.DescendingOrder,
         )
         self.global_search_tree.clear()
-        for record in self.global_search_results:
-            item = QTreeWidgetItem([
-                record.name,
-                type_labels.get(record.file_type, record.file_type),
-                format_size(record.size),
-                f"{account_labels.get(record.account_id, record.account_id)} · {record.repo_id}",
-                record.path,
-            ])
-            item.setData(0, Qt.ItemDataRole.UserRole, record)
-            self.global_search_tree.addTopLevelItem(item)
+        self.global_search_render_index = 0
         self.global_search_label.setText(self._tf(
             "搜索结果：{count} 项", count=len(self.global_search_results)
         ))
         self._set_global_search_visible(True)
+        if self.global_search_results:
+            self.global_search_render_timer.start()
+
+    def _render_global_search_chunk(self) -> None:
+        start = self.global_search_render_index
+        records = self.global_search_results[start:start + 400]
+        if not records:
+            self.global_search_render_timer.stop()
+            return
+        items: list[QTreeWidgetItem] = []
+        for record in records:
+            item = QTreeWidgetItem([
+                record.name,
+                self._global_search_type_labels.get(record.file_type, record.file_type),
+                format_size(record.size),
+                f"{self._global_search_account_labels.get(record.account_id, record.account_id)} · {record.repo_id}",
+                record.path,
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, record)
+            items.append(item)
+        self.global_search_tree.setUpdatesEnabled(False)
+        self.global_search_tree.addTopLevelItems(items)
+        self.global_search_tree.setUpdatesEnabled(True)
+        self.global_search_render_index += len(records)
+        if self.global_search_render_index >= len(self.global_search_results):
+            self.global_search_render_timer.stop()
+            self.global_search_tree.viewport().update()
 
     def _global_search_sort_key(self, record: IndexedEntry) -> tuple:
-        values = (
-            record.name.casefold(),
-            record.file_type.casefold(),
-            record.size,
-            record.repo_id.casefold(),
-            record.path.casefold(),
-        )
-        return (values[self.global_search_sort_column], record.path.casefold())
+        return self._indexed_search_sort_key(record, self.global_search_sort_column)
 
     def _change_global_search_sort(self, column: int) -> None:
         self.global_search_sort_order = (
@@ -126,7 +370,8 @@ class RepositorySearchMixin:
         )
         self.global_search_sort_column = column
         self.global_search_tree.header().setSortIndicator(column, self.global_search_sort_order)
-        self._perform_global_search()
+        self.global_search_render_timer.stop()
+        self._start_global_search_render()
 
     def _global_search_context_menu(self, position) -> None:
         item = self.global_search_tree.itemAt(position)

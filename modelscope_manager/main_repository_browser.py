@@ -34,6 +34,15 @@ class RepositoryBrowserMixin:
         if value:
             self.repo_heading.setText(self._t(message or "正在处理…"))
 
+    def _update_resource_upload_actions(self) -> None:
+        writable = bool(
+            self.selected_repo
+            and not self.selected_repo_public
+            and self._token_service_for_repo(self.selected_repo) is not None
+        )
+        self.upload_file_button.setEnabled(writable)
+        self.upload_folder_button.setEnabled(writable)
+
     def _run_task(self, action: Callable[[], Any], success: Callable[[Any], None], label: str) -> None:
         self._busy(True, label)
         worker = TaskThread(action, self)
@@ -326,11 +335,14 @@ class RepositoryBrowserMixin:
         self.service = service
         self.selected_repo = repo
         self.selected_repo_public = public
+        self.remote_detail_tree.clearSelection()
+        self.remote_thumbnail_list.clearSelection()
         self.repo_heading.setText(f"{repo.repo_id} · {repo.repo_type}")
         self.directory_history.clear()
         self._set_current_directory("", remember=False)
         self.refresh_files_button.setEnabled(True)
         self.new_folder_button.setEnabled(not public)
+        self._update_resource_upload_actions()
         self._update_upload_enabled()
         self.load_remote_files()
 
@@ -502,17 +514,20 @@ class RepositoryBrowserMixin:
             self.remote_thumbnail_list.setUpdatesEnabled(False)
             self.remote_thumbnail_list.clear()
         group_by = str(self.group_by_combo.currentData() or "") if hasattr(self, "group_by_combo") else ""
+        self.remote_detail_tree.setRootIsDecorated(bool(group_by))
         parents: dict[str, QTreeWidgetItem] = {}
         direct.sort(key=self._detail_sort_key, reverse=self.detail_sort_order == Qt.SortOrder.DescendingOrder)
         for entry in direct:
             name = entry.path.rsplit("/", 1)[-1]
             size = self.folder_index.cached_folder_size(self.selected_repo, entry.path, self.selected_repo_public) if entry.is_dir and self.selected_repo else entry.size
             item = QTreeWidgetItem([
-                name,
+                f"\u2002{name}",
                 self._t("文件夹") if entry.is_dir else self._t("文件"),
                 format_size(size) if size is not None else "--",
             ])
             item.setData(0, Qt.ItemDataRole.UserRole, entry)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
             if group_by:
                 key = name[:1].upper() if group_by == "name" else ("文件夹" if entry.is_dir else Path(name).suffix.lower() or "文件") if group_by == "type" else self._size_group(size)
                 parent = parents.get(key)
@@ -528,6 +543,8 @@ class RepositoryBrowserMixin:
             if self.resource_view_mode == "thumbnails":
                 thumbnail_item = QListWidgetItem(name)
                 thumbnail_item.setData(Qt.ItemDataRole.UserRole, entry)
+                thumbnail_item.setFlags(thumbnail_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                thumbnail_item.setCheckState(Qt.CheckState.Unchecked)
                 thumbnail_item.setToolTip(f"{self._t('文件夹') if entry.is_dir else self._t('文件')} · {format_size(size) if size is not None else '--'}")
                 thumbnail = self.thumbnail_paths.get(entry.path)
                 if thumbnail:
@@ -539,6 +556,7 @@ class RepositoryBrowserMixin:
         self.remote_detail_tree.setUpdatesEnabled(True)
         if self.resource_view_mode == "thumbnails":
             self.remote_thumbnail_list.setUpdatesEnabled(True)
+        self._update_remote_selection_actions()
 
     @staticmethod
     def _direct_remote_entries(entries: list[RemoteEntry], folder: str) -> list[RemoteEntry]:
@@ -599,12 +617,12 @@ class RepositoryBrowserMixin:
             if not self.directory_history or self.directory_history[-1] != self.current_directory_path:
                 self.directory_history.append(self.current_directory_path)
         self.current_directory_path = target
-        self.target_edit.setText(self.current_directory_path)
         self.resource_path_label.set_path(self.current_directory_path, self._t("根目录"))
         self.resource_back_button.setEnabled(bool(self.selected_repo and self.current_directory_path))
         directory = RemoteEntry(self.current_directory_path, is_dir=True)
         self.remote_detail_tree.set_drop_directory(directory)
         self.remote_thumbnail_list.set_drop_directory(directory)
+        self._update_resource_upload_actions()
 
     def _go_to_directory(self, path: str) -> bool:
         if not self.selected_repo:
@@ -657,13 +675,24 @@ class RepositoryBrowserMixin:
         self._set_current_directory("", remember=False)
 
     def _remote_thumbnail_selected(self) -> None:
-        item = self.remote_thumbnail_list.currentItem()
-        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
-        enabled = isinstance(entry, RemoteEntry)
-        self.download_selected_button.setEnabled(enabled)
-        self.web_manage_button.setEnabled(
-            enabled and self.selected_repo is not None and self.active_account_kind == "web"
-        )
+        if getattr(self, "_syncing_remote_checks", False):
+            return
+        self._syncing_remote_checks = True
+        for index in range(self.remote_thumbnail_list.count()):
+            item = self.remote_thumbnail_list.item(index)
+            item.setCheckState(
+                Qt.CheckState.Checked if item.isSelected() else Qt.CheckState.Unchecked
+            )
+        self._syncing_remote_checks = False
+        self._update_remote_selection_actions()
+
+    def _remote_thumbnail_item_checked(self, item: QListWidgetItem) -> None:
+        if getattr(self, "_syncing_remote_checks", False):
+            return
+        self._syncing_remote_checks = True
+        item.setSelected(item.checkState() == Qt.CheckState.Checked)
+        self._syncing_remote_checks = False
+        self._update_remote_selection_actions()
 
     def _open_remote_thumbnail(self, item: QListWidgetItem) -> None:
         entry = item.data(Qt.ItemDataRole.UserRole)
@@ -685,12 +714,45 @@ class RepositoryBrowserMixin:
             self._show_paste_menu(self.remote_thumbnail_list, position, self.service, self.selected_repo, self.current_directory_path)
 
     def _remote_detail_selected(self) -> None:
-        items = self.remote_detail_tree.selectedItems()
-        entry = items[0].data(0, Qt.ItemDataRole.UserRole) if items else None
-        enabled = isinstance(entry, RemoteEntry)
-        self.download_selected_button.setEnabled(enabled)
+        if getattr(self, "_syncing_remote_checks", False):
+            return
+        self._syncing_remote_checks = True
+        iterator = QTreeWidgetItemIterator(self.remote_detail_tree)
+        while iterator.value():
+            item = iterator.value()
+            if isinstance(item.data(0, Qt.ItemDataRole.UserRole), RemoteEntry):
+                item.setCheckState(
+                    0, Qt.CheckState.Checked if item.isSelected() else Qt.CheckState.Unchecked
+                )
+            iterator += 1
+        self._syncing_remote_checks = False
+        self._update_remote_selection_actions()
+
+    def _remote_detail_item_checked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0 or getattr(self, "_syncing_remote_checks", False):
+            return
+        if not isinstance(item.data(0, Qt.ItemDataRole.UserRole), RemoteEntry):
+            return
+        self._syncing_remote_checks = True
+        item.setSelected(item.checkState(0) == Qt.CheckState.Checked)
+        self._syncing_remote_checks = False
+        self._update_remote_selection_actions()
+
+    def _selected_visible_remote_entries(self) -> list[RemoteEntry]:
+        if hasattr(self, "global_search_tree") and not self.global_search_tree.isHidden():
+            return []
+        if self.resource_view_mode == "thumbnails":
+            values = [item.data(Qt.ItemDataRole.UserRole) for item in self.remote_thumbnail_list.selectedItems()]
+        else:
+            values = [item.data(0, Qt.ItemDataRole.UserRole) for item in self.remote_detail_tree.selectedItems()]
+        return [entry for entry in values if isinstance(entry, RemoteEntry)]
+
+    def _update_remote_selection_actions(self) -> None:
+        selected = self._selected_visible_remote_entries()
+        available = bool(selected and self.selected_repo is not None and self.service is not None)
+        self.download_selected_button.setEnabled(available)
         self.web_manage_button.setEnabled(
-            enabled and self.selected_repo is not None and self.active_account_kind == "web"
+            available and self.active_account_kind == "web"
         )
 
     def _open_remote_detail(self, item: QTreeWidgetItem, _column: int = 0) -> None:
@@ -719,21 +781,12 @@ class RepositoryBrowserMixin:
             self._show_paste_menu(self.remote_detail_tree, position, self.service, self.selected_repo, self.current_directory_path)
 
     def _download_selected_remote(self) -> None:
-        items = self.remote_detail_tree.selectedItems()
-        entry = items[0].data(0, Qt.ItemDataRole.UserRole) if items else None
-        if not isinstance(entry, RemoteEntry):
-            item = self.remote_thumbnail_list.currentItem()
-            entry = item.data(Qt.ItemDataRole.UserRole) if item else None
-        if isinstance(entry, RemoteEntry):
+        for entry in self._selected_visible_remote_entries():
             self.add_remote_download(entry)
 
     def _delete_selected_remote(self) -> None:
-        items = self.remote_detail_tree.selectedItems()
-        entry = items[0].data(0, Qt.ItemDataRole.UserRole) if items else None
-        if not isinstance(entry, RemoteEntry):
-            item = self.remote_thumbnail_list.currentItem()
-            entry = item.data(Qt.ItemDataRole.UserRole) if item else None
-        if isinstance(entry, RemoteEntry) and self.selected_repo:
-            self._delete_remote_entry(
-                str(self.active_account_id or ""), self.selected_repo, entry, self.remote_entries,
+        selected = self._selected_visible_remote_entries()
+        if selected and self.selected_repo:
+            self._delete_remote_entries(
+                str(self.active_account_id or ""), self.selected_repo, selected, self.remote_entries,
             )

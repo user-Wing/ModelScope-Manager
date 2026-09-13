@@ -93,3 +93,19 @@ def unprotect(value: str) -> str:
     finally:
         kernel32.LocalFree(target.pbData)
         del keepalive
+
+
+def store_secret(text: str, *, plaintext: bool = False, allow_machine_fallback: bool = False) -> str:
+    """Store a secret either explicitly as plaintext or with DPAPI."""
+    if not text:
+        return ""
+    if plaintext:
+        return "p:" + text
+    return protect(text, allow_machine_fallback=allow_machine_fallback)
+
+
+def load_secret(value: str) -> str:
+    """Load a secret written by :func:`store_secret` or older DPAPI storage."""
+    if value.startswith("p:"):
+        return value[2:]
+    return unprotect(value)

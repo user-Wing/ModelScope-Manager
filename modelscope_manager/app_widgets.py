@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPalette, QPen, QPolygonF
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QListWidget, QMenu, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QListWidget, QMenu, QPushButton, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from datetime import datetime
 from .app_helpers import breadcrumb_levels
 from .service import RemoteEntry
@@ -78,8 +78,94 @@ class TransferChart(QWidget):
                 return float(size), name
         return 1.0, "B/s"
 
+def _dropped_local_paths(event) -> list[str]:
+    if not event.mimeData().hasUrls():
+        return []
+    return [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+
+
+def _upload_target_text(path: str) -> str:
+    return f"上传到 /{path}" if path else "上传到根目录"
+
+
+class _BreadcrumbDropButton(QPushButton):
+    paths_dropped = Signal(list, str)
+
+    def __init__(self, text: str, target: str):
+        super().__init__(text)
+        self.target = target
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if _dropped_local_paths(event):
+            QToolTip.showText(self.mapToGlobal(self.rect().bottomLeft()), _upload_target_text(self.target), self)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if _dropped_local_paths(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        paths = _dropped_local_paths(event)
+        QToolTip.hideText()
+        if paths:
+            self.paths_dropped.emit(paths, self.target)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+class _BreadcrumbDropMenu(QMenu):
+    paths_dropped = Signal(list, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if _dropped_local_paths(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        action = self.actionAt(event.position().toPoint())
+        if action is not None and _dropped_local_paths(event):
+            target = str(action.data() or "")
+            QToolTip.showText(self.mapToGlobal(event.position().toPoint()), _upload_target_text(target), self)
+            self.setActiveAction(action)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        action = self.actionAt(event.position().toPoint())
+        paths = _dropped_local_paths(event)
+        QToolTip.hideText()
+        if action is not None and paths:
+            self.paths_dropped.emit(paths, str(action.data() or ""))
+            self.close()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+class _BreadcrumbOverflowButton(QPushButton):
+    def dragEnterEvent(self, event) -> None:
+        if _dropped_local_paths(event) and self.menu() is not None:
+            self.menu().popup(self.mapToGlobal(QPoint(0, self.height())))
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 class PathBreadcrumb(QFrame):
     path_selected = Signal(str)
+    paths_dropped = Signal(list, str)
 
     def __init__(self):
         super().__init__()
@@ -89,7 +175,8 @@ class PathBreadcrumb(QFrame):
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(6, 2, 6, 2)
         self._layout.setSpacing(1)
-        self.overflow_button = QPushButton("…")
+        self.overflow_button = _BreadcrumbOverflowButton("…")
+        self.overflow_button.setAcceptDrops(True)
         self._rebuild()
 
     def set_path(self, path: str, root_text: str = "根目录") -> None:
@@ -130,13 +217,16 @@ class PathBreadcrumb(QFrame):
                 used += previous
 
         hidden = levels[:visible_start]
-        self.overflow_button = QPushButton("…")
+        self.overflow_button = _BreadcrumbOverflowButton("…")
+        self.overflow_button.setAcceptDrops(True)
         self.overflow_button.setObjectName("breadcrumbButton")
         self.overflow_button.setToolTip("选择上级目录")
         if hidden:
-            menu = QMenu(self.overflow_button)
+            menu = _BreadcrumbDropMenu(self.overflow_button)
+            menu.paths_dropped.connect(self.paths_dropped)
             for label, target in hidden:
                 action = menu.addAction(label)
+                action.setData(target)
                 action.triggered.connect(
                     lambda checked=False, value=target: self.path_selected.emit(value)
                 )
@@ -150,13 +240,14 @@ class PathBreadcrumb(QFrame):
                 separator = QLabel("›")
                 separator.setObjectName("breadcrumbSeparator")
                 self._layout.addWidget(separator)
-            button = QPushButton(label)
+            button = _BreadcrumbDropButton(label, target)
             button.setObjectName("breadcrumbButton")
             button.setProperty("breadcrumbPath", target)
             button.setMaximumWidth(width(label))
             button.clicked.connect(
                 lambda checked=False, value=target: self.path_selected.emit(value)
             )
+            button.paths_dropped.connect(self.paths_dropped)
             self._layout.addWidget(button)
         self._layout.addStretch(1)
 

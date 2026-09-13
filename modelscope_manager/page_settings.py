@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon as FIF, ScrollArea as FluentScrollArea, SettingCardGroup, SpinBox as FluentSpinBox, ToolButton
+from . import __version__
 from .fluent_ui import CleanComboBox, ControlSettingCard, FluentSwitchButton, PanelSettingCard
 
 
@@ -336,6 +337,27 @@ class SettingsPageMixin:
         general_grid.addWidget(self.startup_checkbox, 2, 1)
         general_layout.addLayout(general_grid)
 
+        update_card = QFrame(objectName="card")
+        update_layout = QVBoxLayout(update_card)
+        update_layout.setContentsMargins(20, 18, 20, 20)
+        update_layout.addWidget(QLabel("软件更新", objectName="panelTitle"))
+        self.auto_update_checkbox = FluentSwitchButton("启动后自动检查更新")
+        self.auto_update_checkbox.setChecked(True)
+        self.auto_update_checkbox.toggled.connect(self._auto_update_changed)
+        update_layout.addWidget(self.auto_update_checkbox)
+        update_actions = QHBoxLayout()
+        self.update_status_label = QLabel(f"当前版本：{__version__}", objectName="subtitle")
+        self.update_status_label.setWordWrap(True)
+        update_actions.addWidget(self.update_status_label, 1)
+        self.update_check_button = QPushButton("手动检查更新")
+        self.update_check_button.clicked.connect(self.check_for_updates)
+        update_actions.addWidget(self.update_check_button)
+        self.update_restart_button = QPushButton("立即重启更新", objectName="primary")
+        self.update_restart_button.clicked.connect(self.restart_to_install_update)
+        self.update_restart_button.hide()
+        update_actions.addWidget(self.update_restart_button)
+        update_layout.addLayout(update_actions)
+
         theme_card = QFrame(objectName="card")
         theme_layout = QVBoxLayout(theme_card)
         theme_layout.setContentsMargins(20, 18, 20, 20)
@@ -548,6 +570,7 @@ class SettingsPageMixin:
         ))
 
         panel_specs = (
+            ("软件更新", FIF.UPDATE, "ModelScope 更新", "从 ARXChem/Software-List 获取最新便携包", update_card),
             ("账号设置", FIF.PEOPLE, "ModelScope 账户", "Token 与网页登录信息使用设备绑定加密保存", token_card),
             ("下载设置", FIF.DOWNLOAD, "下载与传输", "默认目录、aria2-next 分段、SDK 上传队列和共享限速", download_card),
             ("播放设置", FIF.PLAY, "媒体播放器", "内置 PotPlayer 与第三方播放器", player_card),
@@ -577,6 +600,41 @@ class SettingsPageMixin:
             ),
         ))
         settings_layout.insertWidget(settings_layout.count() - 1, webdav_group)
+
+        experimental_panel = QFrame()
+        experimental_layout = QVBoxLayout(experimental_panel)
+        experimental_layout.setContentsMargins(18, 14, 18, 14)
+        experimental_layout.setSpacing(12)
+        experimental_layout.addWidget(QLabel(
+            "这些选项会降低凭据安全性或绕过稳定性保护。凭据类选项启用前必须完成风险确认和四位数加法验证。",
+            objectName="subtitle",
+        ))
+        self.plaintext_credentials_switch = FluentSwitchButton("明文保存密码、Token 与登录 Cookie")
+        self.disable_device_destruction_switch = FluentSwitchButton("关闭跨设备凭据自动销毁")
+        for control in (
+            self.plaintext_credentials_switch,
+            self.disable_device_destruction_switch,
+        ):
+            experimental_layout.addWidget(control)
+        self.plaintext_credentials_switch.toggled.connect(
+            lambda checked: self._experimental_setting_toggled(
+                "plaintext_credentials", self.plaintext_credentials_switch, checked, True,
+            )
+        )
+        self.disable_device_destruction_switch.toggled.connect(
+            lambda checked: self._experimental_setting_toggled(
+                "disable_device_destruction", self.disable_device_destruction_switch, checked, True,
+            )
+        )
+        experimental_group = SettingCardGroup("实验性功能", settings_content)
+        experimental_group.addSettingCard(PanelSettingCard(
+            FIF.DEVELOPER_TOOLS,
+            "高风险测试选项",
+            "明文凭据与跨设备保留",
+            experimental_panel,
+            experimental_group,
+        ))
+        settings_layout.addWidget(experimental_group)
         settings_layout.addStretch()
         settings_scroll.setWidget(settings_content)
         settings_page_layout.addWidget(settings_scroll)

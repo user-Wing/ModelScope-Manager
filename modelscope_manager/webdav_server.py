@@ -20,7 +20,6 @@ from urllib.request import Request
 from .folder_index import FolderSizeIndex
 from .http_security import modelscope_token_headers, safe_urlopen
 from .service import (
-    MAX_MODEL_UPLOAD_FILE_SIZE,
     ModelScopeService,
     RemoteEntry,
     Repository,
@@ -380,8 +379,6 @@ class ModelScopeWebDAV:
         repo = self.resolve("/" + "/".join(parts[:3]))
         if repo is None or repo.repo is None:
             raise FileNotFoundError("Repository not found")
-        if repo.repo.repo_type == "model" and length > MAX_MODEL_UPLOAD_FILE_SIZE:
-            raise OverflowError("Model repositories do not accept files larger than 50 GB")
         remote_path = normalize_remote_path(*parts[3:])
         existed = self.resolve("/" + clean) is not None
         suffix = Path(remote_path).suffix

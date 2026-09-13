@@ -91,6 +91,52 @@ class DatabaseTests(unittest.TestCase):
                 connection.close()
             self.assertEqual((cipher, bound_id), ("", ""))
 
+    def test_plaintext_credentials_can_survive_device_change_when_destruction_is_disabled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "manager.sqlite3"
+            initialize_database(path)
+            session = ModelScopeWebSession("web-session", "csrf-session", "csrf-token")
+            store = AccountStore(
+                path, "device-a", plaintext_storage=True, destroy_on_device_change=False,
+            )
+            account = store.save(AccountRecord("", "Main", "alice", "secret-token", True))
+            store.save_web_session(account.account_id, session)
+
+            copied = AccountStore(
+                path, "device-b", identity_replaced=True,
+                plaintext_storage=True, destroy_on_device_change=False,
+            )
+            self.assertEqual(copied.list_accounts()[0].token, "secret-token")
+            self.assertEqual(copied.load_web_session(account.account_id), session)
+            self.assertFalse(copied.tokens_destroyed)
+            connection = sqlite3.connect(path)
+            try:
+                token_cipher, session_cipher = connection.execute(
+                    "SELECT token_cipher, session_cipher FROM accounts "
+                    "JOIN account_web_sessions USING (account_id)"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(token_cipher, "p:secret-token")
+            self.assertIn("web-session", session_cipher)
+
+    def test_switching_plaintext_storage_migrates_saved_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "manager.sqlite3"
+            initialize_database(path)
+            with patch("modelscope_manager.database.protect", return_value="u:encrypted"), patch(
+                "modelscope_manager.database.unprotect", return_value="secret-token"
+            ):
+                store = AccountStore(path, "device-a")
+                store.save(AccountRecord("", "Main", token="secret-token", remember=True))
+                self.assertEqual(store.set_plaintext_storage(True), 1)
+            connection = sqlite3.connect(path)
+            try:
+                cipher = connection.execute("SELECT token_cipher FROM accounts").fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(cipher, "p:secret-token")
+
     def test_web_session_is_encrypted_device_bound_and_independent_from_token_account(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "manager.sqlite3"

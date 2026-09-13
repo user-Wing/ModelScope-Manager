@@ -275,11 +275,21 @@ def initialize_database(path: Path, legacy_folder_index: Path | None = None) -> 
 
 
 class AccountStore:
-    def __init__(self, path: Path, device_id: str, identity_replaced: bool = False):
+    def __init__(
+        self,
+        path: Path,
+        device_id: str,
+        identity_replaced: bool = False,
+        *,
+        plaintext_storage: bool = False,
+        destroy_on_device_change: bool = True,
+    ):
         self.path = path
         self.device_id = device_id
+        self.plaintext_storage = plaintext_storage
+        self.destroy_on_device_change = destroy_on_device_change
         self.tokens_destroyed = False
-        if identity_replaced:
+        if identity_replaced and destroy_on_device_change:
             self.tokens_destroyed = self._saved_token_count() > 0 or self._saved_web_session_count() > 0
             self.destroy_all_tokens()
             self.destroy_all_web_sessions()
@@ -288,6 +298,58 @@ class AccountStore:
         connection = sqlite3.connect(self.path, timeout=15)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _encode_secret(self, plaintext: str) -> str:
+        return "p:" + plaintext if self.plaintext_storage else protect(plaintext)
+
+    @staticmethod
+    def _decode_secret(cipher: str) -> str:
+        return cipher[2:] if cipher.startswith("p:") else unprotect(cipher)
+
+    def set_plaintext_storage(self, enabled: bool) -> int:
+        """Migrate every readable saved credential to the selected storage mode."""
+        previous = self.plaintext_storage
+        self.plaintext_storage = enabled
+        migrated = 0
+        connection = self._connect()
+        try:
+            for row in connection.execute(
+                "SELECT account_id, token_cipher FROM accounts WHERE token_cipher <> ''"
+            ).fetchall():
+                cipher = str(row["token_cipher"])
+                try:
+                    plaintext = self._decode_secret(cipher)
+                except Exception:
+                    continue
+                replacement = self._encode_secret(plaintext)
+                if replacement != cipher:
+                    connection.execute(
+                        "UPDATE accounts SET token_cipher=?, token_device_id=? WHERE account_id=?",
+                        (replacement, self.device_id, str(row["account_id"])),
+                    )
+                    migrated += 1
+            for row in connection.execute(
+                "SELECT account_id, session_cipher FROM account_web_sessions"
+            ).fetchall():
+                cipher = str(row["session_cipher"])
+                try:
+                    plaintext = self._decode_secret(cipher)
+                except Exception:
+                    continue
+                replacement = self._encode_secret(plaintext)
+                if replacement != cipher:
+                    connection.execute(
+                        "UPDATE account_web_sessions SET session_cipher=?, session_device_id=? WHERE account_id=?",
+                        (replacement, self.device_id, str(row["account_id"])),
+                    )
+                    migrated += 1
+            connection.commit()
+        except Exception:
+            self.plaintext_storage = previous
+            raise
+        finally:
+            connection.close()
+        return migrated
 
     def _upgrade_account_cipher(self, account_id: str, token: str) -> None:
         """Rewrite legacy machine-scope account credentials with user DPAPI."""
@@ -340,15 +402,16 @@ class AccountStore:
             cipher = str(row["token_cipher"] or "")
             bound_id = str(row["token_device_id"] or "")
             if cipher:
-                if bound_id != self.device_id:
+                if bound_id != self.device_id and self.destroy_on_device_change:
                     invalid_ids.append(str(row["account_id"]))
                 else:
                     try:
-                        token = unprotect(cipher)
+                        token = self._decode_secret(cipher)
                     except Exception:
-                        invalid_ids.append(str(row["account_id"]))
+                        if self.destroy_on_device_change:
+                            invalid_ids.append(str(row["account_id"]))
                     else:
-                        if cipher.startswith("m:"):
+                        if cipher.startswith("m:") and not self.plaintext_storage:
                             try:
                                 self._upgrade_account_cipher(str(row["account_id"]), token)
                             except Exception:
@@ -432,7 +495,7 @@ class AccountStore:
 
     def save(self, account: AccountRecord) -> AccountRecord:
         account_id = account.account_id or str(uuid.uuid4())
-        cipher = protect(account.token) if account.remember and account.token else ""
+        cipher = self._encode_secret(account.token) if account.remember and account.token else ""
         connection = self._connect()
         try:
             existing = connection.execute(
@@ -497,7 +560,7 @@ class AccountStore:
             connection.close()
 
     def save_web_session(self, account_id: str, session: ModelScopeWebSession) -> None:
-        cipher = protect(json.dumps(session.to_dict(), ensure_ascii=False, separators=(",", ":")))
+        cipher = self._encode_secret(json.dumps(session.to_dict(), ensure_ascii=False, separators=(",", ":")))
         connection = self._connect()
         try:
             connection.execute(
@@ -521,17 +584,18 @@ class AccountStore:
             connection.close()
         if not row:
             return None
-        if str(row["session_device_id"]) != self.device_id:
+        if str(row["session_device_id"]) != self.device_id and self.destroy_on_device_change:
             self.destroy_web_session(account_id)
             return None
         try:
             cipher = str(row["session_cipher"])
-            plaintext = unprotect(cipher)
+            plaintext = self._decode_secret(cipher)
             session = ModelScopeWebSession.from_dict(json.loads(plaintext))
         except Exception:
-            self.destroy_web_session(account_id)
+            if self.destroy_on_device_change:
+                self.destroy_web_session(account_id)
             return None
-        if cipher.startswith("m:"):
+        if cipher.startswith("m:") and not self.plaintext_storage:
             try:
                 self._upgrade_web_session_cipher(account_id, plaintext)
             except Exception:

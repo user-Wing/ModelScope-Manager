@@ -220,14 +220,9 @@ class BackupsMixin:
                 self._mark_repository_dirty(job.account_id, repo)
         self._render_backup_jobs()
         self.backup_status_label.setText(self._tf(
-            "备份完成：{uploaded} 个上传，{failed} 个失败，{skipped} 个超过或等于 50 GB 已跳过",
-            uploaded=uploaded, failed=failed, skipped=skipped,
+            "备份完成：{uploaded} 个上传，{failed} 个失败",
+            uploaded=uploaded, failed=failed,
         ))
-        if skipped and not self.backup_automatic:
-            QMessageBox.warning(
-                self, self._t("已跳过超大文件"),
-                self._tf("{count} 个文件达到或超过 50 GB，未上传。", count=skipped),
-            )
 
     def _backup_finished(self, worker: BackupThread) -> None:
         if self.backup_thread is worker:

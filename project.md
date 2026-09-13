@@ -27,11 +27,11 @@
 | 删除/移动/重命名 | 独立网页登录会话执行 | **平台限制：Token API 不允许删除**；批量删除 100 文件/次提交，失败回退逐项 |
 | 上传 | 一律走有权 Token 的 SDK | 网页上传接口受限；文件夹上传、备份、图床共用 |
 | 播放私有资源 | 仅监听 127.0.0.1 的内存流转发鉴权 | Token 不进播放器命令行，无媒体缓存 |
-| Token 存储 | DPAPI 加密 + `device.id` 设备绑定 | 复制目录到别台机器自动失效清除 |
+| Token / Cookie 存储 | 默认 DPAPI 加密 + `device.id` 设备绑定；实验模式可切换明文或关闭跨设备销毁 | 默认安全不变；降低保护前必须确认风险并完成四位数加法验证 |
 | 运行环境 | 便携 `runtime/`（~220MB，不提交 Git） | 免装 Python；`main.py` 优先注入便携 site-packages |
 | 上传限速 | monkey-patch SDK 的 `_CountedReadStream` | SDK 多线程上传，进程级共享限速器保证 aggregate 而非 per-file |
 | 索引策略 | 启动全量一次；之后空闲/变更才刷新 | 避免普通翻页反复遍历仓库；后台间隔可配置 |
-| 50GB 上限 | 上传前提示并跳过 | 单文件 ≥50GB 不静默失败 |
+| 大文件上传 | 不设 50 GB 软件拦截，默认交给 SDK 上传 | 已用 51 GiB LFS 初始化请求确认服务端接受；内置 SDK 上限为 100 GB |
 | 路径安全 | `normalize_remote_path` / `parse_modelscope_repository_url` / 下载越界校验 | 防 `..` 穿越与非法链接 |
 
 ## 4. 目录地图
@@ -41,7 +41,7 @@ ModelScope-Manager/
 ├─ modelscope_manager/        核心包（47 个模块）
 │  ├─ app.py                  应用初始化、run() 与旧版导入兼容层（约 14KB / 342 行）
 │  ├─ app_helpers.py          应用级常量、路径/大小/速度格式化等纯函数
-│  ├─ app_widgets.py          TransferChart、面包屑、仓库树/列表和拖放区
+│  ├─ app_widgets.py          TransferChart、可拖放面包屑、仓库树/列表和拖放区
 │  ├─ app_workers.py          上传、下载、缩略图、删除、备份、图床与索引后台线程
 │  ├─ login_dialog.py         Edge WebView2 子进程的 Qt 控制对话框
 │  ├─ page_shell.py           页面装配、导航注册与初始路由
@@ -66,6 +66,7 @@ ModelScope-Manager/
 │  ├─ webview_login.py        Edge WebView2 登录子进程：私密会话、Cookie 捕获与 IPC
 │  ├─ media_proxy.py          AuthenticatedMediaProxy：私有媒体内存流转发鉴权
 │  ├─ player_installer.py     PotPlayer 可选安装：下载 7z → SHA-256 校验 → 7z-zstd 解压
+│  ├─ updater.py / main_updates.py  ModelScope 版本发现、下载校验、解压与退出后更新
 │  ├─ security.py             DPAPI protect / unprotect（Token 设备绑定）
 │  ├─ storage.py              路径常量 / DeviceIdentity / portable_settings（统一 data/ 目录）
 │  ├─ http_security.py        modelscope_token_headers / safe_urlopen
@@ -99,7 +100,7 @@ ModelScope-Manager/
 | 传输列表 | 上传/下载二级栏；进度/速度/ETA；暂停/恢复/取消；统计 | `page_transfer.py` + `main_transfers.py` + `app_workers.py` |
 | 备份文件夹 | 多任务、增量/覆盖模式及云端同步回本地 | `page_backup.py` + `main_backups.py` + `backup.py` |
 | 图床 | 拖入/粘贴上传、AVIF 预转换、直链与本地记录 | `page_image_bed.py` + `main_image_bed.py` + `image_bed.py` + `avif_converter.py` |
-| 设置（底部固定） | 账号、下载、播放、WebDAV、索引、外观与资源监控 | `page_settings.py` + `main_accounts.py` + `main_integrations.py` + `main_window_shell.py` |
+| 设置（底部固定） | 软件更新、账号、下载、播放、WebDAV、索引、外观与资源监控 | `page_settings.py` + `main_updates.py` + `main_accounts.py` + `main_integrations.py` + `main_window_shell.py` |
 | 托盘菜单 | WebDAV 状态、实时速度、显示主窗与退出 | `main_window_shell.py` |
 
 > 页面间关系：资源管理 → 选中文件 → 加入下载队列 → 传输列表；资源搜索 → 公开仓库 → 挂入 Public 根节点。`page_*.py` 只负责构建控件，行为落在对应 `main_*.py`，由 `main_mixins.py` 组合进 `MainWindow`。
@@ -131,7 +132,7 @@ ModelScope-Manager/
 
 ## 8. 代码拆解（现状与维护边界）
 **现状体检**
-- 原 `app.py` 的 7521 行已拆为 21 个职责模块；当前入口约 342 行，最大拆分文件 `main_window_shell.py` 为 970 行，其余均低于 1000 行。
+- 原 `app.py` 的 7521 行已拆为 21 个职责模块；当前入口约 342 行，最大拆分文件 `main_window_shell.py` 为 892 行，其余均低于 1000 行。
 - `app.py` 保留原有类、线程与辅助函数的导入兼容性；业务方法由 `main_mixins.py` 组合，外部调用方无需跟随内部路径迁移。
 - 原有 258 个非页面装配方法与 34 个辅助符号经过 AST 对比，拆分前后实现一致；页面装配按六个导航页切成独立构建器。
 
@@ -143,21 +144,23 @@ ModelScope-Manager/
 5. 已健康的 `service/database/download_service/webdav_server` 等业务层不因 UI 拆分而改动。
 
 ## 9. 更新与发布
-- **现状**：无 CI / 无打包脚本提交；便携构建（runtime + data + start.bat）手工产出；`CHANGELOG.md` 为统一入口，1.0.2—1.0.5 另保留详细日志。
+- **更新源**：公开数据集 `ARXChem/Software-List` 的 `ModelScope-Manager/<版本>.7z`；程序自动枚举并按数字版本选择最新版。
+- **安装流程**：aria2-next 下载并按远端大小/SHA-256 校验 → 7z 路径安全检查与解压 → 用户确认重启 → 主进程退出后覆盖程序文件。归档禁止包含 `data/`。
+- **现状**：无 CI / 无打包脚本提交；便携构建（runtime + start.bat，不含 data）手工产出；`CHANGELOG.md` 为统一入口，1.0.2—1.0.5 另保留详细日志。
 - **建议**：
   1. 打包流程写成脚本或文档步骤（runtime 如何收集、data 如何排除、start.bat 生成），进仓库。
   2. 发布检查清单：`main.py` 可跑 → 便携构建自测 → 版本号 + 更新日志同步 → Tag。
   3. 本项目 Git 纪律：`runtime/`、`data/` 永不提交（.gitignore），`embedded-tools/` 随仓库。
 
 ## 10. 当前状态
-- **版本**：v1.0.6（以 Cut 版为基线，已合回完整版测试与历史说明资产）。
-- **发布**：GitHub 标签与 Release 均使用 `1.0.6`；便携资产名为 `ModelScope-Manager-1.0.6-Windows-x64.7z`，归档不包含 `data/`。
+- **版本**：v1.0.7；已完成实验性凭据策略、大文件常规上传、路径栏定向拖放、资源多选、索引搜索和传输统计优化。
+- **发布**：GitHub Release `1.0.7`；ModelScope 更新资产为 `ModelScope-Manager/1.0.7.7z`。
 - **结构**：上帝文件拆分完成；`app.py` 为稳定兼容入口，21 个模块承载页面、行为、后台任务和共享控件。
 - **已知限制**（平台/设计约束，勿当 bug 修）：
   - Token 账户无法删除/移动/重命名（ModelScope 平台限制）→ 用网页会话。
   - 私有直链为 API 形式，仅对拥有仓库权限的访问者有效。
   - Git 仓库不保存空目录 → 新建目录首次上传后才可见。
-  - 单文件 ≥50GB 跳过；上传进度在 SDK 数据读取边界生效。
+  - 单文件低于 100 GB 可直接上传；达到内置 SDK 上限或平台限制时由 SDK 返回错误。
   - `dial tcp ... connectex` = AList 未连上网关（非程序 bug）。
 
 ## 11. 故障排查（先查这里再改代码）

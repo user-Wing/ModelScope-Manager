@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QDateTime, Qt
-from PySide6.QtWidgets import QCheckBox, QDateTimeEdit, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar, QPushButton, QTabWidget, QTableWidget, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDateTimeEdit, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar, QPushButton, QTabWidget, QTableWidget, QTextEdit, QVBoxLayout, QWidget
 from datetime import datetime, timedelta
 from qfluentwidgets import ScrollArea as FluentScrollArea
-from .app_widgets import DropArea, TransferChart
+from .app_widgets import TransferChart
 
 
 class TransferPageMixin:
@@ -22,27 +22,6 @@ class TransferPageMixin:
         upload_page = QWidget()
         upload_layout = QVBoxLayout(upload_page)
         upload_layout.setContentsMargins(8, 12, 8, 8)
-        target_row = QHBoxLayout()
-        target_row.addWidget(QLabel("上传到："))
-        self.target_edit = QLineEdit()
-        self.target_edit.setPlaceholderText("根目录")
-        target_row.addWidget(self.target_edit, 1)
-        upload_layout.addLayout(target_row)
-        self.drop_area = DropArea()
-        self.drop_area.paths_dropped.connect(self.add_paths)
-        upload_layout.addWidget(self.drop_area)
-        pick_row = QHBoxLayout()
-        files_button = QPushButton("选择文件")
-        files_button.clicked.connect(self.pick_files)
-        folder_button = QPushButton("选择文件夹")
-        folder_button.clicked.connect(self.pick_folder)
-        clear_button = QPushButton("清空")
-        clear_button.clicked.connect(self.clear_queue)
-        pick_row.addWidget(files_button)
-        pick_row.addWidget(folder_button)
-        pick_row.addWidget(clear_button)
-        pick_row.addStretch()
-        upload_layout.addLayout(pick_row)
         self.queue_table = QTableWidget(0, 4)
         self.queue_table.setHorizontalHeaderLabels(["本地项目", "类型", "目标路径", "状态"])
         queue_header = self.queue_table.horizontalHeader()
@@ -54,9 +33,12 @@ class TransferPageMixin:
         self.queue_table.setColumnWidth(2, 260)
         self.queue_table.setColumnWidth(3, 130)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.queue_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+        self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         upload_layout.addWidget(self.queue_table, 1)
         upload_options = QHBoxLayout()
+        clear_button = QPushButton("清空")
+        clear_button.clicked.connect(self.clear_queue)
+        upload_options.addWidget(clear_button)
         self.keep_folder_name = QCheckBox("保留文件夹名称")
         self.keep_folder_name.setChecked(True)
         upload_options.addWidget(self.keep_folder_name)
@@ -151,23 +133,23 @@ class TransferPageMixin:
         filter_layout.setHorizontalSpacing(12)
         filter_layout.setVerticalSpacing(10)
         filter_layout.addWidget(QLabel("时间段", objectName="section"), 0, 0, 1, 4)
-        filter_layout.addWidget(QLabel("开始时间", objectName="metricCaption"), 1, 0)
+        filter_layout.addWidget(QLabel("开始时间", objectName="statsTimeCaption"), 1, 0)
         self.statistics_start_edit = QDateTimeEdit()
         self.statistics_start_edit.setObjectName("statisticsDateEdit")
         self.statistics_start_edit.setCalendarPopup(True)
         self.statistics_start_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-        self.statistics_start_edit.setFixedWidth(136)
+        self.statistics_start_edit.setFixedWidth(190)
         self.statistics_end_edit = QDateTimeEdit()
         self.statistics_end_edit.setObjectName("statisticsDateEdit")
         self.statistics_end_edit.setCalendarPopup(True)
         self.statistics_end_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-        self.statistics_end_edit.setFixedWidth(136)
+        self.statistics_end_edit.setFixedWidth(190)
         now = datetime.now()
         session_start = datetime.fromtimestamp(self.session_started_at)
         self.statistics_start_edit.setDateTime(QDateTime(max(session_start, now - timedelta(days=1))))
         self.statistics_end_edit.setDateTime(QDateTime(now))
         filter_layout.addWidget(self.statistics_start_edit, 2, 0)
-        filter_layout.addWidget(QLabel("结束时间", objectName="metricCaption"), 1, 1)
+        filter_layout.addWidget(QLabel("结束时间", objectName="statsTimeCaption"), 1, 1)
         filter_layout.addWidget(self.statistics_end_edit, 2, 1)
         self.statistics_live_checkbox = QCheckBox("实时")
         self.statistics_live_checkbox.setChecked(True)
@@ -183,13 +165,13 @@ class TransferPageMixin:
         metrics_row = QHBoxLayout()
         metrics_row.setSpacing(12)
 
-        def add_metric(caption: str) -> QLabel:
+        def add_metric(caption: str, initial: str) -> QLabel:
             card = QFrame(objectName="metricCard")
             layout = QVBoxLayout(card)
             layout.setContentsMargins(14, 12, 14, 12)
             layout.setSpacing(7)
             label = QLabel(caption, objectName="metricCaption")
-            value = QLabel("0 B/s", objectName="metricValue")
+            value = QLabel(initial, objectName="metricValue")
             value.setAlignment(Qt.AlignmentFlag.AlignCenter)
             value.setMinimumWidth(130)
             layout.addWidget(label)
@@ -197,9 +179,9 @@ class TransferPageMixin:
             metrics_row.addWidget(card, 1)
             return value
 
-        self.statistics_upload_value = add_metric("当前上传速度")
-        self.statistics_download_value = add_metric("当前下载速度")
-        self.statistics_learned_value = add_metric("已学习上传速度")
+        self.statistics_upload_total_value = add_metric("上传总量", "0 B")
+        self.statistics_download_total_value = add_metric("下载总量", "0 B")
+        self.statistics_learned_value = add_metric("已学习上传速度", "0 B/s")
         statistics_layout.addLayout(metrics_row)
 
         upload_chart_card = QFrame(objectName="statsChartCard")

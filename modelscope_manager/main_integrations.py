@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 from PySide6.QtCore import QProcess, QTime, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QLabel, QMessageBox, QTableWidgetItem, QTimeEdit
+from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QInputDialog, QLabel, QMessageBox, QTableWidgetItem, QTimeEdit
 from pathlib import Path
 from .app_helpers import PUBLIC_ACCOUNT_ID, find_available_port, format_speed
 from .app_workers import FolderIndexThread, PotPlayerInstallThread
 from .download_service import Aria2Tuning, DownloadSpec
 from .player_installer import POTPLAYER_ARCHIVE_SHA256, POTPLAYER_ARCHIVE_SIZE, POTPLAYER_REMOTE_PATH, POTPLAYER_REPOSITORY, find_potplayer
-from .security import protect
+from .security import store_secret
 from .service import ModelScopeService, MultiAccountService, RemoteEntry, Repository, configure_upload_limit_supplier
 from .storage import PLAYER_DOWNLOAD_DIR, POTPLAYER_DIR
 from .transfer_policy import SpeedRule, TransferPolicy
@@ -21,6 +22,68 @@ from .webdav_server import ModelScopeWebDAV
 
 class IntegrationsMixin:
     """下载参数、播放器、WebDAV 与索引集成。"""
+
+    def _experimental_setting_toggled(self, name, control, checked: bool, challenge: bool) -> None:
+        if getattr(self, "_restoring_settings", False):
+            return
+        if checked and challenge and not self._authorize_experiment(name):
+            control.blockSignals(True)
+            control.setChecked(False)
+            control.blockSignals(False)
+            return
+        try:
+            if name == "plaintext_credentials":
+                self.account_store.set_plaintext_storage(checked)
+                self.plaintext_credentials_enabled = checked
+                self._save_alist_settings()
+            elif name == "disable_device_destruction":
+                self.device_destruction_disabled = checked
+                self.account_store.destroy_on_device_change = not checked
+            self.settings.setValue(f"experiments/{name}", checked)
+            self.settings.sync()
+        except Exception as exc:
+            control.blockSignals(True)
+            control.setChecked(not checked)
+            control.blockSignals(False)
+            QMessageBox.warning(self, self._t("设置失败"), str(exc))
+        self._update_experimental_risk_banner()
+
+    def _authorize_experiment(self, name: str) -> bool:
+        detail = (
+            "凭据将以可直接读取的明文保存。任何能访问 data 目录的程序或人员都可取得密码、Token 和 Cookie。"
+            if name == "plaintext_credentials"
+            else (
+                "设备标识变化时将不再销毁已保存凭据。复制 data 目录可能导致凭据被带到其他设备。"
+                "DPAPI 密文在其他 Windows 账户仍可能无法解密；需配合明文保存才能跨设备直接读取。"
+            )
+        )
+        answer = QMessageBox.warning(
+            self,
+            self._t("高风险实验功能"),
+            self._t(detail + "\n\n你已了解风险并要继续吗？"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        left = secrets.randbelow(9000) + 1000
+        right = secrets.randbelow(9000) + 1000
+        value, accepted = QInputDialog.getText(
+            self,
+            self._t("风险验证"),
+            self._t(f"请输入正确答案以启用：{left} + {right} = ?"),
+        )
+        if not accepted or value.strip() != str(left + right):
+            QMessageBox.warning(self, self._t("验证失败"), self._t("答案不正确，功能未启用。"))
+            return False
+        return True
+
+    def _update_experimental_risk_banner(self) -> None:
+        enabled = any((
+            self.plaintext_credentials_switch.isChecked(),
+            self.disable_device_destruction_switch.isChecked(),
+        ))
+        self.experimental_risk_banner.setVisible(enabled)
 
     def _save_aria2_settings(self) -> None:
         if self._restoring_settings:
@@ -321,7 +384,14 @@ class IntegrationsMixin:
         self.settings.setValue("alist/port", self.alist_port.value())
         self.settings.setValue("alist/username", self.alist_username.text().strip())
         try:
-            self.settings.setValue("alist/password", protect(self.alist_password.text(), allow_machine_fallback=True))
+            self.settings.setValue(
+                "alist/password",
+                store_secret(
+                    self.alist_password.text(),
+                    plaintext=self.plaintext_credentials_enabled,
+                    allow_machine_fallback=True,
+                ),
+            )
         except Exception as exc:
             self._log(f"AList 密码未能安全保存：{exc}")
 

@@ -123,46 +123,48 @@ class CopyThread(QThread):
         temporary = Path(tempfile.mkdtemp(prefix="modelscope-copy-"))
         ok = failed = 0
         try:
-            files = [entry for entry in self.source_entries if not entry.is_dir]
-            if self.selected.is_dir:
-                prefix = self.selected.path.strip("/")
-                files = [entry for entry in files if entry.path.startswith(prefix + "/")]
-                base = Path(prefix).name
-            else:
-                files = [self.selected]
-                base = ""
-            source_parent = self.selected.path.strip("/").rpartition("/")[0]
-            same_location = (
-                self.source_repo.repo_type == self.destination_repo.repo_type
-                and self.source_repo.repo_id == self.destination_repo.repo_id
-                and source_parent == normalize_remote_path(self.destination_folder)
-            )
-            if same_location and self.selected.is_dir:
-                base = copy_name(base, is_dir=True)
-            for entry in files:
-                if self.isInterruptionRequested():
-                    break
-                relative = entry.path[len(self.selected.path.strip("/")):].strip("/") if self.selected.is_dir else Path(entry.path).name
-                if same_location and not self.selected.is_dir:
-                    relative = copy_name(relative)
-                local = temporary / (base if self.selected.is_dir else "") / relative
-                local.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    if hasattr(self.source_service, "download_to_file"):
-                        self.source_service.download_to_file(self.source_repo, entry.path, local)
-                    else:
-                        download_url = self.source_service.get_download_url(self.source_repo, entry.path)
-                        headers = modelscope_token_headers(download_url, self.source_service.token, include_session_cookie=True)
-                        request = Request(download_url, headers=headers)
-                        with safe_urlopen(request, timeout=30) as response, local.open("wb") as output:
-                            while chunk := response.read(1024 * 1024):
-                                output.write(chunk)
-                    target = normalize_remote_path(self.destination_folder, base if self.selected.is_dir else "", relative)
-                    self.destination_service.upload_file_as(self.destination_repo, local, target)
-                except Exception:
-                    failed += 1
+            available_files = [entry for entry in self.source_entries if not entry.is_dir]
+            selected_items = self.selected if isinstance(self.selected, list) else [self.selected]
+            for selected in selected_items:
+                if selected.is_dir:
+                    prefix = selected.path.strip("/")
+                    files = [entry for entry in available_files if entry.path.startswith(prefix + "/")]
+                    base = Path(prefix).name
                 else:
-                    ok += 1
+                    files = [selected]
+                    base = ""
+                source_parent = selected.path.strip("/").rpartition("/")[0]
+                same_location = (
+                    self.source_repo.repo_type == self.destination_repo.repo_type
+                    and self.source_repo.repo_id == self.destination_repo.repo_id
+                    and source_parent == normalize_remote_path(self.destination_folder)
+                )
+                if same_location and selected.is_dir:
+                    base = copy_name(base, is_dir=True)
+                for entry in files:
+                    if self.isInterruptionRequested():
+                        break
+                    relative = entry.path[len(selected.path.strip("/")):].strip("/") if selected.is_dir else Path(entry.path).name
+                    if same_location and not selected.is_dir:
+                        relative = copy_name(relative)
+                    local = temporary / (base if selected.is_dir else "") / relative
+                    local.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        if hasattr(self.source_service, "download_to_file"):
+                            self.source_service.download_to_file(self.source_repo, entry.path, local)
+                        else:
+                            download_url = self.source_service.get_download_url(self.source_repo, entry.path)
+                            headers = modelscope_token_headers(download_url, self.source_service.token, include_session_cookie=True)
+                            request = Request(download_url, headers=headers)
+                            with safe_urlopen(request, timeout=30) as response, local.open("wb") as output:
+                                while chunk := response.read(1024 * 1024):
+                                    output.write(chunk)
+                        target = normalize_remote_path(self.destination_folder, base if selected.is_dir else "", relative)
+                        self.destination_service.upload_file_as(self.destination_repo, local, target)
+                    except Exception:
+                        failed += 1
+                    else:
+                        ok += 1
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -475,7 +477,7 @@ class UploadThread(QThread):
 
         self.progress_info.emit(str(path), 100, current_speed, 0)
         if not files and self.skipped_files:
-            message = "所有文件均超过 50 GB，已跳过"
+            message = "没有可上传的文件"
         else:
             message = f"上传完成：{len(files)} 个文件已分别提交"
         self.item_done.emit(str(path), True, message)
@@ -629,8 +631,6 @@ class ImageUploadThread(QThread):
                 converted_path: Path | None = None
                 remote_file_name = path.name
                 try:
-                    if path.stat().st_size >= 50 * 1024**3:
-                        raise ValueError("图片达到或超过 50 GB")
                     if self.avif_options is not None and path.suffix.lower() != ".avif":
                         if self.ffmpeg_path is None:
                             raise RuntimeError("未找到支持 AVIF 的 FFmpeg")

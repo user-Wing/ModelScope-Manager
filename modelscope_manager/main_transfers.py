@@ -12,7 +12,7 @@ from .app_workers import DownloadThread, UploadQueueItem, UploadThread
 from .backup import LocalBackupFile
 from .download_service import Aria2DownloadRunner, DownloadSpec, build_download_specs
 from .local_paths import iter_contained_files
-from .service import ModelScopeService, RemoteEntry, Repository, normalize_remote_path, oversized_upload_files
+from .service import ModelScopeService, RemoteEntry, Repository, normalize_remote_path
 
 
 class TransfersMixin:
@@ -100,7 +100,7 @@ class TransfersMixin:
         if not accepted or not name.strip():
             return
         try:
-            target = normalize_remote_path(self.target_edit.text(), name.strip())
+            target = normalize_remote_path(self.current_directory_path, name.strip())
         except ValueError as exc:
             QMessageBox.warning(self, self._t("路径无效"), str(exc))
             return
@@ -110,16 +110,19 @@ class TransfersMixin:
 
     def pick_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, "选择要上传的文件")
-        self.add_paths(files)
+        if files:
+            self._repository_paths_dropped(files, RemoteEntry(self.current_directory_path, is_dir=True))
 
     def pick_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
         if folder:
-            self.add_paths([folder])
+            self._repository_paths_dropped(
+                [folder], RemoteEntry(self.current_directory_path, is_dir=True),
+            )
 
     def add_paths(self, raw_paths: list[str], target: str | None = None) -> int:
         try:
-            target = normalize_remote_path(self.target_edit.text() if target is None else target)
+            target = normalize_remote_path(self.current_directory_path if target is None else target)
         except ValueError as exc:
             QMessageBox.warning(self, self._t("路径无效"), str(exc))
             return 0
@@ -157,7 +160,7 @@ class TransfersMixin:
             "completed": self._t("完成"),
             "failed": self._t("失败"),
             "cancelled": self._t("已取消"),
-            "skipped": self._t("已跳过（超过 50 GB）"),
+            "skipped": self._t("已跳过"),
         }
         for item in self.upload_items:
             row = self.queue_table.rowCount()
@@ -190,7 +193,7 @@ class TransfersMixin:
         status_item.setText(text or self._t({
             "waiting": "等待", "uploading": "上传中", "paused": "已暂停",
             "completed": "完成", "failed": "失败", "cancelled": "已取消",
-            "skipped": "已跳过（超过 50 GB）",
+            "skipped": "已跳过",
         }.get(status, status)))
         status_item.setToolTip(message)
         if status == "completed":
@@ -248,8 +251,12 @@ class TransfersMixin:
             self.current_upload_speed if active_upload else 0,
             self.current_download_speed if active_download else 0,
         )
-        self.statistics_upload_value.setText(format_speed(self.current_upload_speed if active_upload else 0))
-        self.statistics_download_value.setText(format_speed(self.current_download_speed if active_download else 0))
+        self.status_upload_speed.setText(
+            f"↑ {format_speed(self.current_upload_speed if active_upload else 0)}"
+        )
+        self.status_download_speed.setText(
+            f"↓ {format_speed(self.current_download_speed if active_download else 0)}"
+        )
         if self.upload_health_monitor.update(
             time.monotonic(), self.current_upload_speed, active_upload,
         ):
@@ -280,6 +287,8 @@ class TransfersMixin:
             start, end = end, start
         samples = self.transfer_statistics.query(start, end)
         upload_total, download_total = self.transfer_statistics.totals(start, end)
+        self.statistics_upload_total_value.setText(format_size(upload_total))
+        self.statistics_download_total_value.setText(format_size(download_total))
         self.statistics_summary.setText(self._tf(
             "上传总量：{upload}    下载总量：{download}",
             upload=format_size(upload_total), download=format_size(download_total),
@@ -339,7 +348,7 @@ class TransfersMixin:
         if not self.upload_session_service or not self.upload_session_repo:
             return
         try:
-            oversized = set(oversized_upload_files([item.path])) if self.upload_session_repo.repo_type == "model" else set()
+            oversized: set[Path] = set()
             if self.upload_session_repo.repo_type != "model":
                 # Validate dataset folders too; size filtering is model-only, path containment is not.
                 for _ in iter_contained_files(item.path):
@@ -348,12 +357,6 @@ class TransfersMixin:
             self._set_upload_status(item, "failed", message=str(exc))
             self.upload_failed += 1
             self._log(f"上传路径被拒绝：{item.path} · {exc}")
-            QTimer.singleShot(0, self._start_next_upload)
-            return
-        if item.path.is_file() and item.path.resolve() in oversized:
-            self._set_upload_status(item, "skipped")
-            self.upload_failed += 1
-            self._log(f"已跳过超过 50 GB 的文件：{item.path}")
             QTimer.singleShot(0, self._start_next_upload)
             return
         self.settings.setValue("target_folder", item.target)

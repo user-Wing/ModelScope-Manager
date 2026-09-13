@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QStatusBar, QVBoxLayout
+from PySide6.QtWidgets import QLabel, QStatusBar, QVBoxLayout
 from qfluentwidgets import FluentIcon as FIF, NavigationItemPosition
 from . import __version__
 
@@ -18,7 +18,20 @@ class PageShellMixin:
         self.navigationInterface.setAcrylicEnabled(True)
         self.status_bar = QStatusBar(self)
         self.status_bar.setObjectName("fluentStatusBar")
-        self.status_bar.showMessage(f"ModelScope Manager {__version__}")
+        self.status_version_label = QLabel(f"ModelScope Manager {__version__}")
+        self.status_version_label.setObjectName("statusVersion")
+        self.status_upload_speed = QLabel("↑ 0 B/s")
+        self.status_upload_speed.setObjectName("statusSpeed")
+        self.status_download_speed = QLabel("↓ 0 B/s")
+        self.status_download_speed.setObjectName("statusSpeed")
+        self.experimental_risk_banner = QLabel("测试模式")
+        self.experimental_risk_banner.setObjectName("statusRiskMode")
+        self.experimental_risk_banner.setToolTip("软件运行在高风险测试模式下")
+        self.experimental_risk_banner.setVisible(False)
+        self.status_bar.addPermanentWidget(self.status_version_label)
+        self.status_bar.addPermanentWidget(self.status_upload_speed)
+        self.status_bar.addPermanentWidget(self.status_download_speed)
+        self.status_bar.addPermanentWidget(self.experimental_risk_banner)
         self.widgetLayout.removeWidget(self.stackedWidget)
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)

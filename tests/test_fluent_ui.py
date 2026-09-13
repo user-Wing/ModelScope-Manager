@@ -1,7 +1,6 @@
 import unittest
 
-from PySide6.QtCore import QAbstractAnimation, Qt
-from PySide6.QtTest import QTest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from qfluentwidgets import ComboBox, FluentIcon, FluentWindow, MenuAnimationType, SettingCard, SettingCardGroup, SpinBox
 
@@ -36,7 +35,7 @@ class FluentUiTests(unittest.TestCase):
         trailing = card.hBoxLayout.itemAt(card.hBoxLayout.count() - 1).spacerItem()
         self.assertEqual(trailing.sizeHint().width(), 40)
 
-    def test_panel_setting_card_uses_aligned_collapsible_header(self):
+    def test_panel_setting_card_uses_aligned_non_animated_collapsible_header(self):
         group = SettingCardGroup("复杂设置")
         card = PanelSettingCard(FluentIcon.SETTING, "详细设置", "按需展开", SpinBox(), group)
         group.addSettingCard(card)
@@ -48,16 +47,13 @@ class FluentUiTests(unittest.TestCase):
         self.assertEqual(card.headerWidget.height(), 70)
         card.expandButton.click()
         self.assertTrue(card.isExpanded())
-        self.assertEqual(card.expandAnimation.state(), QAbstractAnimation.State.Running)
-        QTest.qWait(card.expandAnimation.duration() + 30)
+        self.app.processEvents()
         self.assertGreater(card.minimumHeight(), 70)
         self.assertGreater(group.height(), collapsed_group_height)
         card.expandButton.click()
         self.assertFalse(card.isExpanded())
-        self.assertEqual(card.expandAnimation.state(), QAbstractAnimation.State.Running)
-        QTest.qWait(card.expandAnimation.duration() + 30)
+        self.app.processEvents()
         self.assertEqual(card.height(), 70)
-        self.assertEqual(group.height(), collapsed_group_height)
         self.assertTrue(card.panel.isHidden())
 
     def test_clean_combo_preserves_transparent_rounded_menu_without_shadow(self):

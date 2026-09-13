@@ -73,7 +73,13 @@ class DeviceIdentity:
         return device_id, had_identity
 
 
-def restore_device_bound_token(settings: QSettings, device_id: str, identity_replaced: bool) -> str:
+def restore_device_bound_token(
+    settings: QSettings,
+    device_id: str,
+    identity_replaced: bool,
+    *,
+    destroy_on_device_change: bool = True,
+) -> str:
     """Restore a token only when it is bound to this device, destroying copied data."""
     encrypted = str(settings.value("token", ""))
     if not encrypted:
@@ -81,12 +87,14 @@ def restore_device_bound_token(settings: QSettings, device_id: str, identity_rep
         return ""
     bound_id = str(settings.value("token_device_id", ""))
     if identity_replaced or (bound_id and bound_id != device_id):
-        destroy_saved_token(settings)
+        if destroy_on_device_change:
+            destroy_saved_token(settings)
         return ""
     try:
         token = unprotect(encrypted)
     except Exception:
-        destroy_saved_token(settings)
+        if destroy_on_device_change:
+            destroy_saved_token(settings)
         return ""
     # Bind tokens migrated from the former registry-based settings on first use.
     if not bound_id:

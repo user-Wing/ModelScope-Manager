@@ -1,5 +1,6 @@
 import base64
 import http.client
+import io
 import socket
 import tempfile
 import unittest
@@ -174,14 +175,20 @@ class WebDAVTests(unittest.TestCase):
         move_status, _ = self.request("MOVE", "/datasets/alice/demo/folder/a.txt")
         self.assertEqual((delete_status, move_status), (405, 405))
 
-    def test_model_upload_over_50gb_is_rejected_before_reading(self):
-        status, _ = self.request(
-            "PUT",
-            "/models/alice/model/huge.bin",
-            body=b"",
-            headers={"Content-Length": str(50 * 1024**3 + 1)},
+    def test_model_upload_over_50gb_reaches_stream_handling(self):
+        gateway = ModelScopeWebDAV(
+            lambda: self.service,
+            "127.0.0.1",
+            0,
+            "user",
+            "pass",
         )
-        self.assertEqual(status, 413)
+        with self.assertRaises(ConnectionError):
+            gateway.upload(
+                "/models/alice/model/huge.bin",
+                io.BytesIO(b""),
+                50 * 1024**3 + 1,
+            )
 
 
 if __name__ == "__main__":

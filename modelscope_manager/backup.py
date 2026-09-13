@@ -9,7 +9,6 @@ from pathlib import Path
 from .local_paths import iter_contained_files
 
 
-MAX_BACKUP_FILE_SIZE = 50 * 1024**3
 
 
 @dataclass
@@ -151,9 +150,7 @@ class BackupStore:
             relative = path.relative_to(root).as_posix()
             current_paths.add(relative)
             item = LocalBackupFile(path, relative, int(stat.st_size), int(stat.st_mtime_ns))
-            if item.size >= MAX_BACKUP_FILE_SIZE:
-                oversized.append(item)
-            elif known.get(relative) != (item.size, item.mtime_ns):
+            if known.get(relative) != (item.size, item.mtime_ns):
                 changed.append(item)
         stale = set(known) - current_paths
         if stale:

@@ -1,7 +1,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from modelscope_manager.app import BackupThread
 from modelscope_manager.backup import BackupJob, BackupStore
@@ -18,7 +17,7 @@ class FakeUploadService:
 
 
 class BackupTests(unittest.TestCase):
-    def test_store_detects_changes_persists_state_and_skips_large_files(self):
+    def test_store_detects_changes_and_persists_state_without_size_filtering(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             database = root / "manager.sqlite3"
@@ -32,18 +31,12 @@ class BackupTests(unittest.TestCase):
                 name="Vault", account_id="a", local_path=str(local),
                 repo_id="alice/data", interval_value=1,
             ))
-            with patch("modelscope_manager.backup.MAX_BACKUP_FILE_SIZE", 5):
-                changed, oversized = store.scan_changes(job)
-            self.assertEqual([item.relative_path for item in changed], [])
-            self.assertEqual({item.relative_path for item in oversized}, {"small.txt", "large.bin"})
-
-            with patch("modelscope_manager.backup.MAX_BACKUP_FILE_SIZE", 100):
-                changed, oversized = store.scan_changes(job)
-            self.assertEqual(len(changed), 2)
+            changed, oversized = store.scan_changes(job)
+            self.assertEqual({item.relative_path for item in changed}, {"small.txt", "large.bin"})
             self.assertEqual(oversized, [])
+            self.assertEqual(len(changed), 2)
             store.mark_uploaded(job.job_id, changed[0], f"backup/{changed[0].relative_path}")
-            with patch("modelscope_manager.backup.MAX_BACKUP_FILE_SIZE", 100):
-                remaining, _ = store.scan_changes(job)
+            remaining, _ = store.scan_changes(job)
             self.assertEqual(len(remaining), 1)
             self.assertEqual(len(store.due_jobs()), 1)
             store.mark_scan(job.job_id)

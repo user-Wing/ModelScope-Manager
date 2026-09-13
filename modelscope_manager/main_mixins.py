@@ -10,6 +10,7 @@ from .main_remote_actions import RemoteActionsMixin
 from .main_repository_browser import RepositoryBrowserMixin
 from .main_repository_search import RepositorySearchMixin
 from .main_transfers import TransfersMixin
+from .main_updates import UpdatesMixin
 from .main_window_shell import WindowShellMixin
 from .page_backup import BackupPageMixin
 from .page_image_bed import ImageBedPageMixin
@@ -31,6 +32,7 @@ class MainWindowMixin(
     AccountsMixin,
     BackupsMixin,
     ImageBedMixin,
+    UpdatesMixin,
     WindowShellMixin,
     IntegrationsMixin,
     RepositoryBrowserMixin,

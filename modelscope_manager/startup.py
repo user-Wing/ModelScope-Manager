@@ -15,7 +15,7 @@ def startup_command(app_dir: Path, executable: Path | None = None) -> str:
     pythonw = executable.with_name("pythonw.exe")
     if pythonw.is_file():
         executable = pythonw
-    return f'"{executable}" "{app_dir / "main.py"}"'
+    return f'"{executable}" -s "{app_dir / "main.py"}"'
 
 
 def set_windows_startup(enabled: bool, app_dir: Path, executable: Path | None = None) -> None:

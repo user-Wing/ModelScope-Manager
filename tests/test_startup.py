@@ -17,3 +17,4 @@ class StartupTests(unittest.TestCase):
             command = startup_command(root, executable)
             self.assertIn(str(pythonw.resolve()), command)
             self.assertIn(str((root / "main.py").resolve()), command)
+            self.assertIn(" -s ", command)

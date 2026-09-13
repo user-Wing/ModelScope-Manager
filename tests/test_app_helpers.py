@@ -312,6 +312,24 @@ class AppHelperTests(unittest.TestCase):
             [("根目录", ""), ("models", "models"), ("video", "models/video"), ("frames", "models/video/frames")],
         )
 
+    def test_high_risk_credential_option_requires_four_digit_addition(self):
+        class Harness:
+            _authorize_experiment = MainWindow._authorize_experiment
+            _t = staticmethod(lambda text: text)
+
+        with patch(
+            "modelscope_manager.main_integrations.secrets.randbelow", side_effect=[0, 1]
+        ), patch(
+            "modelscope_manager.main_integrations.QMessageBox.warning",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), patch(
+            "modelscope_manager.main_integrations.QInputDialog.getText",
+            return_value=("2001", True),
+        ) as prompt:
+            self.assertTrue(Harness()._authorize_experiment("plaintext_credentials"))
+
+        self.assertIn("1000 + 1001", prompt.call_args.args[2])
+
     def test_path_breadcrumb_uses_overflow_menu_when_ancestors_do_not_fit(self):
         breadcrumb = PathBreadcrumb()
         breadcrumb.setFixedWidth(180)
@@ -322,6 +340,53 @@ class AppHelperTests(unittest.TestCase):
         self.assertTrue(breadcrumb.overflow_button.isVisible())
         self.assertGreater(len(breadcrumb.overflow_button.menu().actions()), 0)
         breadcrumb.close()
+
+    def test_path_breadcrumb_accepts_uploads_for_root_and_visible_subdirectory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "file.txt"
+            source.write_text("content", encoding="utf-8")
+            breadcrumb = PathBreadcrumb()
+            breadcrumb.setFixedWidth(700)
+            breadcrumb.set_path("models/video")
+            breadcrumb.show()
+            QApplication.processEvents()
+            dropped = []
+            breadcrumb.paths_dropped.connect(lambda paths, target: dropped.append((paths, target)))
+            targets = {
+                str(button.property("breadcrumbPath")): button
+                for button in breadcrumb.findChildren(QPushButton)
+                if button.property("breadcrumbPath") is not None
+            }
+
+            targets[""].dropEvent(FakeDropEvent(QPointF(2, 2), [source]))
+            targets["models"].dropEvent(FakeDropEvent(QPointF(2, 2), [source]))
+
+            self.assertEqual([target for _, target in dropped], ["", "models"])
+            self.assertTrue(all(Path(paths[0]).resolve() == source.resolve() for paths, _ in dropped))
+            breadcrumb.close()
+
+    def test_path_breadcrumb_overflow_menu_accepts_uploads_for_hidden_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "file.txt"
+            source.write_text("content", encoding="utf-8")
+            breadcrumb = PathBreadcrumb()
+            breadcrumb.setFixedWidth(180)
+            breadcrumb.set_path("models/very-long-directory/video/frames")
+            breadcrumb.show()
+            QApplication.processEvents()
+            menu = breadcrumb.overflow_button.menu()
+            menu.show()
+            QApplication.processEvents()
+            action = next(item for item in menu.actions() if item.data() == "models")
+            dropped = []
+            breadcrumb.paths_dropped.connect(lambda paths, target: dropped.append((paths, target)))
+
+            event = FakeDropEvent(QPointF(menu.actionGeometry(action).center()), [source])
+            menu.dropEvent(event)
+
+            self.assertTrue(event.accepted)
+            self.assertEqual(dropped[0][1], "models")
+            breadcrumb.close()
 
     def test_repository_tree_drops_file_and_folder_on_directory_item(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -427,6 +492,7 @@ class AppHelperTests(unittest.TestCase):
             folder_path = root / "folder"
             folder_path.mkdir()
             settings = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
+            settings.setValue("update/automatic", False)
             for key in ("language", "theme", "close_behavior", "copy/threshold_unit", "alist/host"):
                 settings.setValue(key, None)
             paths = {
@@ -504,7 +570,8 @@ class AppHelperTests(unittest.TestCase):
                     {group.titleLabel.text() for group in window.settings_page.findChildren(SettingCardGroup)},
                     {
                         "基本设置", "个性化", "账号设置", "下载设置", "WebDAV 设置",
-                        "播放设置", "索引和预览", "资源监控",
+                        "播放设置", "索引和预览", "资源监控", "软件更新",
+                        "实验性功能",
                     },
                 )
 

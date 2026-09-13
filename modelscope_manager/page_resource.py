@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu, QPushButton, QSplitter, QTreeWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu, QPushButton, QSplitter, QTreeWidget, QVBoxLayout, QWidget
 from .app_widgets import PathBreadcrumb, RepositoryList, RepositoryTree
+from .fluent_ui import CleanComboBox
+from .service import RemoteEntry
 
 
 class ResourcePageMixin:
@@ -39,11 +41,11 @@ class ResourcePageMixin:
         resource_heading.addWidget(self.refresh_files_button)
         resource_heading.addWidget(self.view_button)
         resource_heading.addWidget(QLabel("分组依据"))
-        self.group_by_combo = QComboBox()
-        self.group_by_combo.addItem("无", "")
-        self.group_by_combo.addItem("名称", "name")
-        self.group_by_combo.addItem("类型", "type")
-        self.group_by_combo.addItem("大小", "size")
+        self.group_by_combo = CleanComboBox()
+        self.group_by_combo.addItem("无", userData="")
+        self.group_by_combo.addItem("名称", userData="name")
+        self.group_by_combo.addItem("类型", userData="type")
+        self.group_by_combo.addItem("大小", userData="size")
         self.group_by_combo.currentIndexChanged.connect(self._render_remote_details)
         resource_heading.addWidget(self.group_by_combo)
         self.compact_view_button = QCheckBox("紧凑视图")
@@ -112,7 +114,20 @@ class ResourcePageMixin:
         explorer_toolbar = QHBoxLayout()
         self.resource_path_label = PathBreadcrumb()
         self.resource_path_label.path_selected.connect(self._go_to_directory)
+        self.resource_path_label.paths_dropped.connect(
+            lambda paths, target: self._repository_paths_dropped(
+                paths, RemoteEntry(target, is_dir=True),
+            )
+        )
         explorer_toolbar.addWidget(self.resource_path_label, 1)
+        self.upload_file_button = QPushButton("上传文件")
+        self.upload_file_button.setEnabled(False)
+        self.upload_file_button.clicked.connect(self.pick_files)
+        explorer_toolbar.addWidget(self.upload_file_button)
+        self.upload_folder_button = QPushButton("上传文件夹")
+        self.upload_folder_button.setEnabled(False)
+        self.upload_folder_button.clicked.connect(self.pick_folder)
+        explorer_toolbar.addWidget(self.upload_folder_button)
         self.new_folder_button = QPushButton("新建文件夹")
         self.new_folder_button.setEnabled(False)
         self.new_folder_button.clicked.connect(self.new_folder)
@@ -146,7 +161,11 @@ class ResourcePageMixin:
         self.remote_tree.setVisible(False)
         self.remote_detail_tree = RepositoryTree()
         self.remote_detail_tree.setObjectName("repositoryTree")
+        self.remote_detail_tree.setProperty("detailList", True)
+        self.remote_detail_tree.setRootIsDecorated(False)
         self.remote_detail_tree.setHeaderLabels(["名称", "类型", "大小"])
+        self.remote_detail_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.remote_detail_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         detail_header = self.remote_detail_tree.header()
         detail_header.setSortIndicatorShown(True)
         detail_header.setSectionsClickable(True)
@@ -154,6 +173,7 @@ class ResourcePageMixin:
         self.remote_detail_tree.setColumnWidth(0, 280)
         self.remote_detail_tree.setColumnWidth(1, 90)
         self.remote_detail_tree.itemSelectionChanged.connect(self._remote_detail_selected)
+        self.remote_detail_tree.itemChanged.connect(self._remote_detail_item_checked)
         self.remote_detail_tree.itemDoubleClicked.connect(self._open_remote_detail)
         self.remote_detail_tree.paths_dropped.connect(self._repository_paths_dropped)
         self.remote_detail_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -168,8 +188,10 @@ class ResourcePageMixin:
         self.remote_thumbnail_list.setGridSize(QSize(224, 154))
         self.remote_thumbnail_list.setSpacing(6)
         self.remote_thumbnail_list.setUniformItemSizes(True)
+        self.remote_thumbnail_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.remote_thumbnail_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.remote_thumbnail_list.itemSelectionChanged.connect(self._remote_thumbnail_selected)
+        self.remote_thumbnail_list.itemChanged.connect(self._remote_thumbnail_item_checked)
         self.remote_thumbnail_list.itemDoubleClicked.connect(self._open_remote_thumbnail)
         self.remote_thumbnail_list.paths_dropped.connect(self._repository_paths_dropped)
         self.remote_thumbnail_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -185,6 +207,7 @@ class ResourcePageMixin:
         global_header = self.global_search_tree.header()
         global_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         global_header.setStretchLastSection(True)
+        global_header.setSectionsClickable(True)
         global_header.setSortIndicatorShown(True)
         global_header.sectionClicked.connect(self._change_global_search_sort)
         self.global_search_tree.setColumnWidth(0, 240)

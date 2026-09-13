@@ -18,7 +18,11 @@ QPushButton#navButton:checked { background: #e5f1fb; color: #005a9e; font-weight
 QFrame#card { background: #ffffff; border: 1px solid #e5e5e5; border-radius: 10px; }
 QFrame#metricCard, QFrame#statsFilterCard, QFrame#statsChartCard { background: #ffffff; border: 1px solid #e1e5e9; border-radius: 12px; }
 QLabel#metricCaption { color: #666666; font-size: 12px; }
+QLabel#statsTimeCaption { color: #4a5560; font-size: 13px; font-weight: 600; }
 QLabel#metricValue { color: #005a9e; background: #eaf4fb; border: 1px solid #c9e4f5; border-radius: 9px; padding: 7px 10px; font-size: 17px; font-weight: 650; }
+QLabel#statusVersion { color: #555555; padding: 2px 8px; font-weight: 600; }
+QLabel#statusSpeed { color: #005a9e; background: #edf6fc; border: 1px solid #c9e4f5; border-radius: 7px; padding: 2px 7px; font-weight: 600; }
+QLabel#statusRiskMode { color: #7a2500; background: #ffd59a; border: 1px solid #e7a646; border-radius: 7px; padding: 2px 8px; font-weight: 700; }
 QLabel#speedPill { color: #005a9e; background: #edf6fc; border: 1px solid #c9e4f5; border-radius: 8px; padding: 5px 9px; font-weight: 600; }
 QLabel#transferTotalPill { color: #005a9e; background: #edf6fc; border: 1px solid #c9e4f5; border-radius: 9px; padding: 7px 14px; font-weight: 600; }
 QLabel#title { font-size: 24px; font-weight: 600; }
@@ -33,9 +37,9 @@ QLabel#success { color: #0f7b0f; font-weight: 600; }
 QLabel#error { color: #c42b1c; font-weight: 600; }
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QDateTimeEdit { background: #ffffff; border: 1px solid #c7c7c7; border-bottom: 2px solid #8a8a8a; border-radius: 5px; padding: 7px 9px; min-height: 20px; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QDateTimeEdit:focus { border-bottom-color: #0067c0; }
-QDateTimeEdit#statisticsDateEdit { border: 1px solid #b8c0c8; border-radius: 8px; padding: 6px 2px; font-size: 10px; }
+QDateTimeEdit#statisticsDateEdit { border: 1px solid #b8c0c8; border-radius: 8px; padding: 7px 9px; min-height: 22px; font-size: 13px; font-weight: 600; }
 QDateTimeEdit#statisticsDateEdit:focus { border-color: #0067c0; }
-QDateTimeEdit#statisticsDateEdit::drop-down { width: 14px; background: transparent; border: none; border-left: 1px solid #d8dde2; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+QDateTimeEdit#statisticsDateEdit::drop-down { width: 22px; background: transparent; border: none; border-left: 1px solid #d8dde2; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
 QPushButton { background: #ffffff; border: 1px solid #c7c7c7; border-radius: 5px; padding: 7px 14px; min-height: 20px; }
 QPushButton:hover { background: #f6f6f6; }
 QPushButton:pressed { background: #eeeeee; }
@@ -44,6 +48,8 @@ QPushButton#primary:hover { background: #1975c5; }
 QPushButton:disabled { color: #999999; background: #eeeeee; border-color: #dddddd; }
 QTreeWidget, QListWidget, QTableWidget, QTextEdit { background: #ffffff; border: 1px solid #e2e2e2; border-radius: 7px; selection-background-color: #cce8ff; selection-color: #202020; outline: none; }
 QTreeWidget#repositoryTree::item { min-height: 32px; padding: 2px 4px; }
+QTreeWidget#repositoryTree[detailList="true"]::item { min-height: 32px; padding: 2px 4px 2px 0; }
+QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-right: 7px; }
 QTreeWidget#repositoryTree::item:selected { background: #cce8ff; border-radius: 3px; }
 QHeaderView::section { background: #fafafa; border: none; border-right: 1px solid #d6d6d6; border-bottom: 1px solid #e5e5e5; padding: 7px; font-weight: 600; }
 QTabWidget::pane { border: none; background: transparent; }
@@ -88,7 +94,11 @@ QPushButton#navButton:checked { background: #173b58; color: #d9edff; font-weight
 QFrame#card { background: #2a2d32; border: 1px solid #41454d; border-radius: 10px; }
 QFrame#metricCard, QFrame#statsFilterCard, QFrame#statsChartCard { background: #2a2d32; border: 1px solid #414b55; border-radius: 12px; }
 QLabel#metricCaption { color: #b7bac0; font-size: 12px; }
+QLabel#statsTimeCaption { color: #c7cbd1; font-size: 13px; font-weight: 600; }
 QLabel#metricValue { color: #d9edff; background: #173b58; border: 1px solid #285d82; border-radius: 9px; padding: 7px 10px; font-size: 17px; font-weight: 650; }
+QLabel#statusVersion { color: #c7cbd1; padding: 2px 8px; font-weight: 600; }
+QLabel#statusSpeed { color: #d9edff; background: #213d52; border: 1px solid #365d78; border-radius: 7px; padding: 2px 7px; font-weight: 600; }
+QLabel#statusRiskMode { color: #ffd59a; background: #61300d; border: 1px solid #9c5b20; border-radius: 7px; padding: 2px 8px; font-weight: 700; }
 QLabel#speedPill { color: #d9edff; background: #213d52; border: 1px solid #365d78; border-radius: 8px; padding: 5px 9px; font-weight: 600; }
 QLabel#transferTotalPill { color: #d9edff; background: #213d52; border: 1px solid #365d78; border-radius: 9px; padding: 7px 14px; font-weight: 600; }
 QLabel#title { font-size: 24px; font-weight: 600; }
@@ -102,9 +112,9 @@ QLabel#success { color: #74d680; font-weight: 600; }
 QLabel#error { color: #ff8e84; font-weight: 600; }
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QDateTimeEdit { color: #f2f2f2; background: #202226; border: 1px solid #5a5f69; border-bottom: 2px solid #a5aab3; border-radius: 5px; padding: 7px 9px; min-height: 20px; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QDateTimeEdit:focus { border-bottom-color: #4aa3df; }
-QDateTimeEdit#statisticsDateEdit { border: 1px solid #5a6470; border-radius: 8px; padding: 6px 2px; font-size: 10px; }
+QDateTimeEdit#statisticsDateEdit { border: 1px solid #5a6470; border-radius: 8px; padding: 7px 9px; min-height: 22px; font-size: 13px; font-weight: 600; }
 QDateTimeEdit#statisticsDateEdit:focus { border-color: #4aa3df; }
-QDateTimeEdit#statisticsDateEdit::drop-down { width: 14px; background: transparent; border: none; border-left: 1px solid #48515b; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+QDateTimeEdit#statisticsDateEdit::drop-down { width: 22px; background: transparent; border: none; border-left: 1px solid #48515b; border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
 QComboBox QAbstractItemView { color: #f2f2f2; background: #2a2d32; selection-background-color: #174d73; }
 QPushButton { color: #ededed; background: #30333a; border: 1px solid #5a5f69; border-radius: 5px; padding: 7px 14px; min-height: 20px; }
 QPushButton:hover { background: #3a3e46; }
@@ -114,6 +124,8 @@ QPushButton#primary:hover { background: #2588c7; }
 QPushButton:disabled { color: #858991; background: #292c31; border-color: #42464d; }
 QTreeWidget, QListWidget, QTableWidget, QTextEdit { color: #eeeeee; background: #24272c; border: 1px solid #454a53; border-radius: 7px; selection-background-color: #174d73; selection-color: #ffffff; outline: none; }
 QTreeWidget#repositoryTree::item { min-height: 32px; padding: 2px 4px; }
+QTreeWidget#repositoryTree[detailList="true"]::item { min-height: 32px; padding: 2px 4px 2px 0; }
+QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-right: 7px; }
 QTreeWidget#repositoryTree::item:selected { background: #174d73; border-radius: 3px; }
 QHeaderView::section { color: #e8e8e8; background: #30333a; border: none; border-right: 1px solid #4a4f58; border-bottom: 1px solid #4a4f58; padding: 7px; font-weight: 600; }
 QTabWidget::pane { border: none; background: transparent; }

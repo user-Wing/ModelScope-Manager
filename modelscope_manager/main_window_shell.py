@@ -8,16 +8,16 @@ import sys
 import time
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPalette
-from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QTableWidget, QTextEdit, QTimeEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QWidgetAction
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QTableWidget, QTextEdit, QTimeEdit, QTreeWidget, QWidget, QWidgetAction
 from collections import deque
 from pathlib import Path
 from qfluentwidgets import Theme, setTheme, setThemeColor
 from .app_helpers import PUBLIC_ACCOUNT_ID, format_size, format_speed, restore_combo_setting, thumbnail_batch_policy
 from .app_workers import DownloadThread, ThumbnailThread, UploadThread
-from .database import AccountRecord, IndexedEntry
+from .database import AccountRecord
 from .fluent_ui import CleanComboBox, FluentSwitchButton, PanelSettingCard
 from .player_installer import POTPLAYER_ARCHIVE_SIZE
-from .security import unprotect
+from .security import load_secret
 from .service import ModelScopeService, RemoteEntry, Repository, configure_upload_limit_supplier
 from .startup import set_windows_startup, windows_startup_enabled
 from .storage import APP_DIR, PLAYER_DOWNLOAD_DIR, destroy_saved_token, restore_device_bound_token
@@ -30,7 +30,6 @@ class WindowShellMixin:
 
     def _restore_settings(self) -> None:
         self._restoring_settings = True
-        self.target_edit.setText(str(self.settings.value("target_folder", "")))
         default_download = Path.home() / "Downloads"
         self.download_path_edit.setText(str(self.settings.value("download_path", str(default_download))))
         self.drop_upload_threshold_mb.setValue(int(self.settings.value("upload/drop_threshold_mb", 1024)))
@@ -73,6 +72,11 @@ class WindowShellMixin:
         self.memory_release_threshold.setValue(int(self.settings.value("resources/release_threshold_mb", 512)))
         restore_combo_setting(self.settings, "close_behavior", self.close_behavior_combo, "ask")
         self.startup_checkbox.setChecked(windows_startup_enabled())
+        self.auto_update_checkbox.setChecked(
+            str(self.settings.value("update/automatic", "true")).lower() == "true"
+        )
+        self.plaintext_credentials_switch.setChecked(self.plaintext_credentials_enabled)
+        self.disable_device_destruction_switch.setChecked(self.device_destruction_disabled)
         self.compact_view_button.setChecked(
             str(self.settings.value("compact_view", "false")).lower() == "true"
         )
@@ -109,7 +113,7 @@ class WindowShellMixin:
         encrypted_alist_password = str(self.settings.value("alist/password", ""))
         if encrypted_alist_password:
             try:
-                alist_password = unprotect(encrypted_alist_password)
+                alist_password = load_secret(encrypted_alist_password)
             except Exception:
                 alist_password = secrets.token_urlsafe(12)
         else:
@@ -125,6 +129,7 @@ class WindowShellMixin:
             self.settings,
             self.device_id,
             self.token_destroyed_on_start,
+            destroy_on_device_change=not self.device_destruction_disabled,
         )
         existing_accounts = self.account_store.list_accounts()
         if token and not existing_accounts:
@@ -155,6 +160,7 @@ class WindowShellMixin:
         self._apply_background_index_interval()
         configure_upload_limit_supplier(lambda: self.transfer_policy.limits()[0])
         self._refresh_transfer_limit_status()
+        self._update_experimental_risk_banner()
 
     @staticmethod
     def _stepper(control: QSpinBox | QDoubleSpinBox) -> QWidget:
@@ -187,6 +193,7 @@ class WindowShellMixin:
         self.remote_detail_tree.setVisible(mode == "details")
         self.remote_thumbnail_list.setVisible(mode == "thumbnails")
         self._render_remote_details()
+        self._update_remote_selection_actions()
         if mode == "thumbnails":
             self._schedule_visible_thumbnails()
 
@@ -281,101 +288,6 @@ class WindowShellMixin:
             entry = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(entry, RemoteEntry) and entry.path in paths:
                 item.setIcon(QIcon(paths[entry.path]))
-
-    def show_resource_search(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("搜索已索引资源")
-        dialog.resize(820, 520)
-        layout = QVBoxLayout(dialog)
-        filters = QHBoxLayout()
-        scope = QComboBox()
-        scope.addItem("全部仓库", "all")
-        scope.addItem("当前账户", "account")
-        scope.addItem("当前仓库", "repository")
-        scope.addItem("当前目录", "directory")
-        kind = QComboBox()
-        kind.addItem("全部类型", "all")
-        kind.addItem("视频", "video")
-        kind.addItem("图片", "image")
-        kind.addItem("文档", "document")
-        kind.addItem("压缩包", "archive")
-        tag = QComboBox()
-        tag.addItem("全部标签", "")
-        for value in self.account_store.all_tags():
-            tag.addItem(value, value)
-        query = QLineEdit()
-        query.setPlaceholderText("高级搜索：路径片段 文件名前段 后段")
-        filters.addWidget(scope)
-        filters.addWidget(kind)
-        filters.addWidget(tag)
-        filters.addWidget(query, 1)
-        layout.addLayout(filters)
-        results = QTreeWidget()
-        results.setHeaderLabels(["名称", "类型", "大小", "仓库", "路径"])
-        results.header().setSortIndicatorShown(True)
-        results.header().setStretchLastSection(True)
-        layout.addWidget(results, 1)
-        sort_column = 0
-        sort_order = Qt.SortOrder.AscendingOrder
-
-        def show_result_menu(position) -> None:
-            item = results.itemAt(position)
-            record = item.data(0, Qt.ItemDataRole.UserRole) if item else None
-            if not isinstance(record, IndexedEntry):
-                return
-            service = ModelScopeService("", require_token=False) if record.account_id == PUBLIC_ACCOUNT_ID else self.account_services.get(record.account_id)
-            if service is None:
-                return
-            repo = next((candidate for candidate in self.account_repositories.get(record.account_id, [])
-                         if candidate.repo_type == record.repo_type and candidate.repo_id == record.repo_id), None)
-            repo = repo or Repository(record.repo_id, record.repo_type, "public" if record.account_id == PUBLIC_ACCOUNT_ID else "")
-            entries = [RemoteEntry(value.path, value.size, value.sha256, value.is_dir) for value in self.account_store.repository_entries(record.account_id, record.repo_type, record.repo_id)]
-            entry = RemoteEntry(record.path, record.size, record.sha256, record.is_dir)
-            self._show_remote_menu(results, position, entry, service, repo, entries or [entry], record.account_id)
-
-        def search() -> None:
-            account_id = repo_type = repo_id = path_prefix = None
-            selected_scope = str(scope.currentData())
-            if selected_scope != "all":
-                account_id = PUBLIC_ACCOUNT_ID if self.selected_repo_public else self.active_account_id
-            if selected_scope in {"repository", "directory"} and self.selected_repo:
-                repo_type, repo_id = self.selected_repo.repo_type, self.selected_repo.repo_id
-            if selected_scope == "directory":
-                path_prefix = self.current_directory_path
-            records = self.account_store.search_entries(
-                query.text().strip(), str(kind.currentData()), account_id, repo_type, repo_id,
-                path_prefix, str(tag.currentData() or ""),
-            )
-            keys = (
-                lambda record: record.name.casefold(),
-                lambda record: record.file_type.casefold(),
-                lambda record: record.size,
-                lambda record: record.repo_id.casefold(),
-                lambda record: record.path.casefold(),
-            )
-            records.sort(key=keys[sort_column], reverse=sort_order == Qt.SortOrder.DescendingOrder)
-            results.clear()
-            for record in records:
-                item = QTreeWidgetItem([record.name, record.file_type, format_size(record.size), record.repo_id, record.path])
-                item.setData(0, Qt.ItemDataRole.UserRole, record)
-                results.addTopLevelItem(item)
-
-        def change_sort(column: int) -> None:
-            nonlocal sort_column, sort_order
-            sort_order = Qt.SortOrder.DescendingOrder if column == sort_column and sort_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
-            sort_column = column
-            results.header().setSortIndicator(column, sort_order)
-            search()
-
-        for control in (scope, kind, tag):
-            control.currentIndexChanged.connect(search)
-        query.textChanged.connect(search)
-        query.returnPressed.connect(search)
-        results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        results.customContextMenuRequested.connect(show_result_menu)
-        results.header().sectionClicked.connect(change_sort)
-        search()
-        dialog.exec()
 
     def _t(self, source: str) -> str:
         return self.locale.text(source)
@@ -874,6 +786,7 @@ class WindowShellMixin:
             (self.backup_thread and self.backup_thread.isRunning())
             or (self.image_upload_thread and self.image_upload_thread.isRunning())
             or (self.potplayer_install_thread and self.potplayer_install_thread.isRunning())
+            or (self.update_prepare_thread and self.update_prepare_thread.isRunning())
             or
             self.task
             and self.task.isRunning()
@@ -912,6 +825,15 @@ class WindowShellMixin:
             self.image_upload_thread.wait(3000)
         if self.potplayer_install_thread and self.potplayer_install_thread.isRunning():
             self.potplayer_install_thread.wait(3000)
+        if self.update_check_thread and self.update_check_thread.isRunning():
+            self.update_check_thread.requestInterruption()
+            self.update_check_thread.wait(3000)
+        if self.update_prepare_thread and self.update_prepare_thread.isRunning():
+            self.update_prepare_thread.cancel()
+            self.update_prepare_thread.wait(3000)
+        if self.global_search_task and self.global_search_task.isRunning():
+            self.global_search_task.requestInterruption()
+            self.global_search_task.wait(3000)
         self.resource_monitor.close()
         self.media_proxy.stop()
         if hasattr(self, "tray_icon"):

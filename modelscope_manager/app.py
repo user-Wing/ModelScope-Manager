@@ -176,10 +176,27 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.resize(1180, 760)
         self.setMinimumSize(980, 650)
         self.settings = portable_settings()
+        self.plaintext_credentials_enabled = str(
+            self.settings.value("experiments/plaintext_credentials", "false")
+        ).lower() == "true"
+        self.device_destruction_disabled = str(
+            self.settings.value("experiments/disable_device_destruction", "false")
+        ).lower() == "true"
+        self.settings.remove("experiments/allow_large_uploads")
         self.device_id, identity_replaced = DeviceIdentity(DEVICE_ID_PATH).load_or_create()
-        self.token_destroyed_on_start = bool(identity_replaced and self.settings.contains("token"))
+        self.token_destroyed_on_start = bool(
+            identity_replaced
+            and not self.device_destruction_disabled
+            and self.settings.contains("token")
+        )
         initialize_database(MANAGER_DB_PATH, FOLDER_INDEX_PATH)
-        self.account_store = AccountStore(MANAGER_DB_PATH, self.device_id, identity_replaced)
+        self.account_store = AccountStore(
+            MANAGER_DB_PATH,
+            self.device_id,
+            identity_replaced,
+            plaintext_storage=self.plaintext_credentials_enabled,
+            destroy_on_device_change=not self.device_destruction_disabled,
+        )
         self.backup_store = BackupStore(MANAGER_DB_PATH)
         self.image_store = ImageStore(MANAGER_DB_PATH, IMAGE_CACHE_DIR)
         self.token_destroyed_on_start = self.token_destroyed_on_start or self.account_store.tokens_destroyed
@@ -219,13 +236,17 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.thumbnail_timer.setSingleShot(True)
         self.thumbnail_timer.setInterval(100)
         self.thumbnail_timer.timeout.connect(self._load_visible_thumbnails)
-        self.copy_source: tuple[ModelScopeService, Repository, list[RemoteEntry], RemoteEntry] | None = None
+        self.copy_source: tuple[ModelScopeService, Repository, list[RemoteEntry], list[RemoteEntry]] | None = None
         self.copy_task: CopyThread | None = None
-        self.move_source: tuple[str, ModelScopeService, Repository, list[RemoteEntry], RemoteEntry] | None = None
+        self.move_source: tuple[str, ModelScopeService, Repository, list[RemoteEntry], list[RemoteEntry]] | None = None
         self.delete_task: DeleteThread | None = None
         self.relocate_task: RelocateThread | None = None
         self.relocate_context: tuple[str, Repository, str, Repository, list[RemoteEntry]] | None = None
         self.global_search_results: list[IndexedEntry] = []
+        self.global_search_task: TaskThread | None = None
+        self.global_search_generation = 0
+        self.global_search_pending = False
+        self.global_search_render_index = 0
         self.pending_search_path: str = ""
         self.upload_items: list[UploadQueueItem] = []
         self.upload_session_service: ModelScopeService | None = None
@@ -247,6 +268,11 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.media_proxy = AuthenticatedMediaProxy()
         self.potplayer_install_archive: Path | None = None
         self.potplayer_install_thread: PotPlayerInstallThread | None = None
+        self.update_check_thread: QThread | None = None
+        self.update_prepare_thread: QThread | None = None
+        self.update_check_manual = False
+        self.available_update = None
+        self.prepared_update = None
         self.search_service: ModelScopeService | None = None
         self.search_repo: Repository | None = None
         self.search_entries: list[RemoteEntry] = []
@@ -272,8 +298,11 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.task: QThread | None = None
         self.resource_search_timer = QTimer(self)
         self.resource_search_timer.setSingleShot(True)
-        self.resource_search_timer.setInterval(80)
+        self.resource_search_timer.setInterval(220)
         self.resource_search_timer.timeout.connect(self._perform_global_search)
+        self.global_search_render_timer = QTimer(self)
+        self.global_search_render_timer.setInterval(0)
+        self.global_search_render_timer.timeout.connect(self._render_global_search_chunk)
         self.backup_timer = QTimer(self)
         self.backup_timer.setInterval(30000)
         self.backup_timer.timeout.connect(self._check_backup_schedule)
@@ -292,6 +321,10 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.resource_monitor_timer = QTimer(self)
         self.resource_monitor_timer.setInterval(2000)
         self.resource_monitor_timer.timeout.connect(self._sample_process_resources)
+        self.auto_update_timer = QTimer(self)
+        self.auto_update_timer.setSingleShot(True)
+        self.auto_update_timer.setInterval(2500)
+        self.auto_update_timer.timeout.connect(self.start_auto_update_check)
         self._build_ui()
         hints = QApplication.instance().styleHints()
         if hasattr(hints, "colorSchemeChanged"):
@@ -315,6 +348,7 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.transfer_policy_timer.start()
         self.transfer_statistics_timer.start()
         self.resource_monitor_timer.start()
+        self.auto_update_timer.start()
         self._event_filter_ready = True
 
 

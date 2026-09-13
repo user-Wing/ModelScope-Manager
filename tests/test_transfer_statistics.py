@@ -17,7 +17,7 @@ from modelscope_manager.transfer_statistics import TransferStatistics, UploadHea
 
 class TransferStatisticsTests(unittest.TestCase):
     def test_current_application_version(self):
-        self.assertEqual(__version__, "1.0.6")
+        self.assertEqual(__version__, "1.0.7")
 
     def test_query_and_totals_use_requested_period(self):
         stats = TransferStatistics(100)
