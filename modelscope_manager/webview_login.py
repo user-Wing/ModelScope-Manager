@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterable
@@ -92,7 +93,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         action = _smoke_test if args.smoke_test else _capture_session
         action_args = (window, args.output) if args.smoke_test else (window, args.output, args.timeout)
-        webview.start(action, action_args, gui="edgechromium", private_mode=True)
+        profile = tempfile.TemporaryDirectory(prefix="modelscope-webview2-", ignore_cleanup_errors=True)
+        try:
+            webview.start(
+                action,
+                action_args,
+                gui="edgechromium",
+                private_mode=True,
+                storage_path=profile.name,
+            )
+        finally:
+            profile.cleanup()
         if not args.output.exists():
             _write_result(args.output, {"error": "登录窗口已关闭，未保存会话。"})
     except Exception as exc:

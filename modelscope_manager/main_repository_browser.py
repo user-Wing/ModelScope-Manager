@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QInputDialog, QLabel, QListWidgetItem, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import quote
@@ -27,6 +25,45 @@ class RepositoryBrowserMixin:
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(translated, 5000)
 
+    def _apply_remote_column_visibility(self) -> None:
+        if not hasattr(self, "remote_detail_tree"):
+            return
+        for column, key in ((3, "modified"), (4, "storage"), (5, "sha256"), (6, "blob_id")):
+            visible = str(self.settings.value(f"resource/columns/{key}", "false")).lower() == "true"
+            self.remote_detail_tree.setColumnHidden(column, not visible)
+
+    def _remote_metadata_columns_enabled(self) -> bool:
+        return any(
+            str(self.settings.value(f"resource/columns/{key}", "false")).lower() == "true"
+            for key in ("modified", "storage", "sha256", "blob_id")
+        )
+
+    def _show_remote_column_selector(self, _position=None) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._t("选择列"))
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(self._t("名称、类型和大小是必选列。"), objectName="subtitle"))
+        controls: dict[str, QCheckBox] = {}
+        for key, label in (
+            ("modified", "最后修改"), ("storage", "存储方式"),
+            ("sha256", "SHA-256"), ("blob_id", "Blob ID"),
+        ):
+            control = QCheckBox(self._t(label))
+            control.setChecked(str(self.settings.value(f"resource/columns/{key}", "false")).lower() == "true")
+            controls[key] = control
+            layout.addWidget(control)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for key, control in controls.items():
+            self.settings.setValue(f"resource/columns/{key}", control.isChecked())
+        self._apply_remote_column_visibility()
+        if self.selected_repo_public and self._remote_metadata_columns_enabled():
+            self.load_remote_files()
+
     def _busy(self, value: bool, message: str = "") -> None:
         self.connect_button.setEnabled(not value)
         self.refresh_repos_button.setEnabled(not value)
@@ -42,6 +79,8 @@ class RepositoryBrowserMixin:
         )
         self.upload_file_button.setEnabled(writable)
         self.upload_folder_button.setEnabled(writable)
+        if hasattr(self, "resource_import_url_button"):
+            self.resource_import_url_button.setEnabled(writable)
 
     def _run_task(self, action: Callable[[], Any], success: Callable[[Any], None], label: str) -> None:
         self._busy(True, label)
@@ -414,7 +453,7 @@ class RepositoryBrowserMixin:
         if not self.selected_repo:
             return
         repo = self.selected_repo
-        if self.selected_repo_public:
+        if self.selected_repo_public and not self._remote_metadata_columns_enabled():
             cached = self.account_store.repository_entries(PUBLIC_ACCOUNT_ID, repo.repo_type, repo.repo_id)
             if cached:
                 self._files_loaded([
@@ -524,7 +563,13 @@ class RepositoryBrowserMixin:
                 f"\u2002{name}",
                 self._t("文件夹") if entry.is_dir else self._t("文件"),
                 format_size(size) if size is not None else "--",
+                entry.last_modified or "--",
+                self._t("目录") if entry.is_dir else (entry.storage or "--"),
+                entry.sha256 or "--",
+                entry.blob_id or "--",
             ])
+            for column in (3, 5, 6):
+                item.setToolTip(column, item.text(column))
             item.setData(0, Qt.ItemDataRole.UserRole, entry)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -590,6 +635,14 @@ class RepositoryBrowserMixin:
         if self.detail_sort_column == 2:
             size = self.folder_index.cached_folder_size(self.selected_repo, entry.path, self.selected_repo_public) if entry.is_dir and self.selected_repo else entry.size
             return (size is None, size if size is not None else 0, name.casefold())
+        if self.detail_sort_column == 3:
+            return (entry.last_modified.casefold(), name.casefold())
+        if self.detail_sort_column == 4:
+            return (entry.storage.casefold(), name.casefold())
+        if self.detail_sort_column == 5:
+            return (entry.sha256.casefold(), name.casefold())
+        if self.detail_sort_column == 6:
+            return (entry.blob_id.casefold(), name.casefold())
         return (name.casefold(),)
 
     def _change_detail_sort(self, column: int) -> None:

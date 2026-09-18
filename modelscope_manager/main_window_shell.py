@@ -11,18 +11,23 @@ from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStyle, QSystemTrayIcon, QTabWidget, QTableWidget, QTextEdit, QTimeEdit, QTreeWidget, QWidget, QWidgetAction
 from collections import deque
 from pathlib import Path
-from qfluentwidgets import Theme, setTheme, setThemeColor
+from qfluentwidgets import Theme, qconfig, setTheme, setThemeColor
+from . import __version__
 from .app_helpers import PUBLIC_ACCOUNT_ID, format_size, format_speed, restore_combo_setting, thumbnail_batch_policy
 from .app_workers import DownloadThread, ThumbnailThread, UploadThread
 from .database import AccountRecord
 from .fluent_ui import CleanComboBox, FluentSwitchButton, PanelSettingCard
 from .player_installer import POTPLAYER_ARCHIVE_SIZE
+from .plugin_installer import FFMPEG_ARCHIVE_SIZE
+from .resource_monitor import ProcessResourceMonitor
 from .security import load_secret
 from .service import ModelScopeService, RemoteEntry, Repository, configure_upload_limit_supplier
 from .startup import set_windows_startup, windows_startup_enabled
-from .storage import APP_DIR, PLAYER_DOWNLOAD_DIR, destroy_saved_token, restore_device_bound_token
+from .storage import APP_DIR, PLAYER_DOWNLOAD_DIR, PLUGIN_DOWNLOAD_DIR, destroy_saved_token, restore_device_bound_token
 from .styles import theme_qss
+from .skin_theme import render_note
 from .transfer_policy import TransferPolicy
+from .webdav_mapping import load_webdav_mappings
 
 
 class WindowShellMixin:
@@ -58,8 +63,12 @@ class WindowShellMixin:
         for rule in self.transfer_policy.rules:
             self._add_speed_rule(rule.start, rule.end, rule.upload_mib, rule.download_mib)
         restore_combo_setting(self.settings, "language", self.language_combo, "zh_CN")
-        restore_combo_setting(self.settings, "theme", self.theme_combo, "system")
         self.font_size_spin.setValue(int(self.settings.value("font_size", 10)))
+        western_font = str(self.settings.value("font/western", "Segoe UI"))
+        chinese_font = str(self.settings.value("font/chinese", "Microsoft YaHei UI"))
+        self.western_font_combo.setCurrentIndex(max(0, self.western_font_combo.findText(western_font)))
+        self.chinese_font_combo.setCurrentIndex(max(0, self.chinese_font_combo.findText(chinese_font)))
+        self._load_skin_controls_from_config()
         self.gpu_acceleration_checkbox.setChecked(
             str(self.settings.value("graphics/gpu_acceleration", "true")).lower() == "true"
         )
@@ -107,6 +116,14 @@ class WindowShellMixin:
                 QTimer.singleShot(0, lambda: self._start_potplayer_extraction(archive))
             else:
                 self.builtin_player_status.setText(self._t("PotPlayer：下载未完成，点击按钮继续"))
+        self._refresh_ffmpeg_status()
+        if str(self.settings.value("plugin/ffmpeg_install_pending", "false")).lower() == "true":
+            archive = PLUGIN_DOWNLOAD_DIR / "FFmpeg.7z"
+            self.ffmpeg_install_archive = archive
+            if archive.is_file() and archive.stat().st_size == FFMPEG_ARCHIVE_SIZE:
+                QTimer.singleShot(0, lambda: self._start_ffmpeg_extraction(archive))
+            else:
+                self.ffmpeg_status.setText(self._t("FFmpeg：下载未完成，点击按钮继续"))
         restore_combo_setting(self.settings, "alist/host", self.alist_host_combo, "127.0.0.1")
         self.alist_port.setValue(int(self.settings.value("alist/port", 9867)))
         self.alist_username.setText(str(self.settings.value("alist/username", "modelscope")))
@@ -122,6 +139,12 @@ class WindowShellMixin:
         self.alist_auto_start.setChecked(
             str(self.settings.value("alist/auto_start", "false")).lower() == "true"
         )
+        self.webdav_mappings = load_webdav_mappings(
+            str(self.settings.value("webdav/custom_mappings", "[]"))
+        )
+        self._render_webdav_mappings()
+        self._restore_webdav_local_mounts()
+        self._apply_remote_column_visibility()
         self.disable_settings_wheel.setChecked(
             str(self.settings.value("disable_settings_wheel", "true")).lower() == "true"
         )
@@ -156,6 +179,9 @@ class WindowShellMixin:
         self._render_public_history()
         self._refresh_tag_filter()
         self._apply_theme()
+        self._refresh_theme_notes()
+        self._restore_transfer_queues()
+        self._refresh_transfer_history()
         self._compact_view_changed(self.compact_view_button.isChecked())
         self._apply_background_index_interval()
         configure_upload_limit_supplier(lambda: self.transfer_policy.limits()[0])
@@ -186,6 +212,7 @@ class WindowShellMixin:
     def switchTo(self, interface: QWidget) -> None:
         """Use a shorter Fluent transition to avoid repainting complex pages for 300 ms."""
         self.stackedWidget.view.setCurrentWidget(interface, duration=160)
+        self._apply_page_background(interface)
 
     def _set_view_mode(self, mode: str) -> None:
         self.resource_view_mode = mode
@@ -381,12 +408,17 @@ class WindowShellMixin:
             ("transferInterface", "传输列表"),
             ("backupInterface", "备份文件夹"),
             ("imageInterface", "图床"),
+            ("webdavMappingInterface", "WebDAV 映射"),
             ("settingsInterface", "设置"),
         ):
             item = self.navigationInterface.widget(route_key)
             if item is not None and hasattr(item, "setText"):
                 item.setText(self._t(source))
         self._refresh_transfer_statistics()
+        self._refresh_transfer_limit_status()
+        if hasattr(self, "update_status_label") and self.available_update is None:
+            self.update_status_label.setText(self._tf("当前版本：{version}", version=__version__))
+        self._refresh_theme_notes()
         if hasattr(self, "queue_table"):
             self._render_upload_queue()
         if hasattr(self, "web_account_table"):
@@ -420,8 +452,16 @@ class WindowShellMixin:
         mode = str(self.theme_combo.currentData()) if hasattr(self, "theme_combo") else "system"
         dark = self._system_is_dark() if mode == "system" else mode == "dark"
         acrylic = bool(hasattr(self, "acrylic_checkbox") and self.acrylic_checkbox.isChecked())
-        setTheme(Theme.DARK if dark else Theme.LIGHT)
-        setThemeColor("#0078D4")
+        accent = self._skin_accent_color().name()
+        page = self.page_stack.currentWidget() if hasattr(self, "page_stack") else None
+        background = self._has_skin_images()
+        western = self.western_font_combo.currentText() if hasattr(self, "western_font_combo") else "Segoe UI"
+        chinese = self.chinese_font_combo.currentText() if hasattr(self, "chinese_font_combo") else "Microsoft YaHei UI"
+        target_theme = Theme.DARK if dark else Theme.LIGHT
+        if qconfig.theme != target_theme:
+            setTheme(target_theme)
+        if qconfig.themeColor.value.name().casefold() != accent.casefold():
+            setThemeColor(accent)
         app = QApplication.instance()
         palette = QPalette()
         palette.setColor(QPalette.ColorRole.Window, QColor("#202124" if dark else "#f3f3f3"))
@@ -434,8 +474,20 @@ class WindowShellMixin:
         palette.setColor(QPalette.ColorRole.Highlight, QColor("#174d73" if dark else "#cce8ff"))
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff" if dark else "#202020"))
         app.setPalette(palette)
-        app.setStyleSheet("")
-        app.setStyleSheet(theme_qss(dark, acrylic))
+        qss = theme_qss(dark, acrylic, (western, chinese), accent, "skin" if background else "")
+        if getattr(self, "_last_app_qss", "") != qss:
+            app.setStyleSheet(qss)
+            self._last_app_qss = qss
+        if hasattr(self, "navigationInterface"):
+            self.navigationInterface.setAcrylicEnabled(acrylic)
+            self.navigationInterface.style().unpolish(self.navigationInterface)
+            self.navigationInterface.style().polish(self.navigationInterface)
+            self.navigationInterface.update()
+        if hasattr(self, "status_bar"):
+            self.status_bar.style().unpolish(self.status_bar)
+            self.status_bar.style().polish(self.status_bar)
+            self.status_bar.update()
+        self._apply_page_background(page)
         if hasattr(self, "queue_table"):
             self._render_upload_queue()
         self.setProperty("theme", "dark" if dark else "light")
@@ -468,9 +520,10 @@ class WindowShellMixin:
                 self.graphics_status.setText("Mica 已关闭，使用低开销不透明背景。")
 
     def _graphics_settings_changed(self) -> None:
-        if not self._restoring_settings:
-            self.settings.setValue("graphics/gpu_acceleration", self.gpu_acceleration_checkbox.isChecked())
-            self.settings.setValue("graphics/acrylic", self.acrylic_checkbox.isChecked())
+        if self._restoring_settings:
+            return
+        self.settings.setValue("graphics/gpu_acceleration", self.gpu_acceleration_checkbox.isChecked())
+        self.settings.setValue("graphics/acrylic", self.acrylic_checkbox.isChecked())
         self._apply_theme()
 
     def _resource_settings_changed(self, *_args) -> None:
@@ -481,10 +534,13 @@ class WindowShellMixin:
 
     def _sample_process_resources(self) -> None:
         try:
+            if self.resource_monitor is None:
+                self.resource_monitor = ProcessResourceMonitor()
             sample = self.resource_monitor.sample()
         except Exception as exc:
             self.resource_usage_label.setText(self._tf("资源监控不可用：{error}", error=exc))
             return
+        self._last_resource_sample = sample
         gpu = "不可用" if sample.gpu_dedicated_bytes is None else (
             f"专用 {format_size(sample.gpu_dedicated_bytes)} / 共享 {format_size(sample.gpu_shared_bytes or 0)}"
         )
@@ -497,6 +553,7 @@ class WindowShellMixin:
                 gpu=gpu,
             )
         )
+        self._refresh_theme_notes()
         background = not self.isVisible() or QApplication.applicationState() != Qt.ApplicationState.ApplicationActive
         active_transfer = bool(
             (self.task and self.task.isRunning())
@@ -516,40 +573,98 @@ class WindowShellMixin:
             self._last_memory_trim = now
 
     def _release_process_memory(self, *_args) -> None:
+        if self.resource_monitor is None:
+            self.resource_monitor = ProcessResourceMonitor()
         released = self.resource_monitor.trim_working_set()
         self._last_memory_trim = time.monotonic()
         self.status_bar.showMessage(self._t("已请求释放进程工作集") if released else self._t("当前系统不支持工作集释放"), 5000)
         QTimer.singleShot(100, self._sample_process_resources)
 
     def _theme_changed(self) -> None:
-        if not self._restoring_settings:
-            self.settings.setValue("theme", self.theme_combo.currentData())
+        if self._restoring_settings:
+            return
+        self.skin_config.color_mode = str(self.theme_combo.currentData())
+        # A brightness tuned against a dark palette can make the light palette
+        # look permanently dim (and vice versa). Mode changes intentionally
+        # restore every page assignment to the neutral 100% baseline.
+        for image in self.skin_config.images:
+            image.pages = {page: 100 for page in image.pages}
+        self._save_skin_config()
+        self._render_skin_table()
         self._apply_theme()
 
+    def _refresh_theme_notes(self) -> None:
+        sample = self._last_resource_sample
+        runtime = max(0, int(time.time() - self.session_started_at))
+        days, remainder = divmod(runtime, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        runtime_text = f"{days}天 {hours:02d}:{minutes:02d}:{seconds:02d}" if days else f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        values = {
+            "US": format_speed(self.current_upload_speed),
+            "DS": format_speed(self.current_download_speed),
+            "AU": format_size(self.lifetime_upload_bytes),
+            "AD": format_size(self.lifetime_download_bytes),
+            "CU": format_size(self.session_upload_bytes),
+            "CD": format_size(self.session_download_bytes),
+            "VER": __version__,
+            "CPU": f"{sample.cpu_percent:.1f}%" if sample else "--",
+            "RAM": format_size(sample.working_set_bytes) if sample else "--",
+            "RT": runtime_text,
+        }
+        self.setWindowTitle(render_note(self.skin_config.top_note, values) or "ModelScope Manager")
+        if hasattr(self, "status_note_label"):
+            text = render_note(self.skin_config.bottom_note, values)
+            self.status_note_label.setText(text)
+            self.status_note_label.setToolTip(text)
+            self._update_status_note_width()
+            self.status_note_label.setVisible(bool(text))
+
+    def _update_status_note_width(self) -> None:
+        if not hasattr(self, "status_bar") or not hasattr(self, "status_note_label"):
+            return
+        text_width = self.status_note_label.fontMetrics().horizontalAdvance(
+            self.status_note_label.text()
+        ) + 20
+        risk_width = self.experimental_risk_banner.sizeHint().width() if self.experimental_risk_banner.isVisible() else 0
+        transient_reserve = 220 if self.status_bar.currentMessage() else 24
+        available = max(0, self.status_bar.width() - risk_width - transient_reserve)
+        # Size to the actual note instead of a fixed percentage. This lets long
+        # skin notes use a wide window while still yielding space to a live
+        # AList/aria2 message when one is present.
+        self.status_note_label.setFixedWidth(min(text_width, available))
+
     def _font_size_changed(self, value: int) -> None:
-        if not self._restoring_settings:
-            self.settings.setValue("font_size", value)
+        if self._restoring_settings:
+            return
+        self.settings.setValue("font_size", value)
         self._apply_font_scale(value)
 
     def _apply_font_scale(self, point_size: int) -> None:
         app = QApplication.instance()
         base_size = 10.0
         widgets = app.allWidgets()
+        previous_size = max(1, int(getattr(self, "_current_font_point_size", 10)))
         for widget in widgets:
             if widget.property("fluentBasePointSize") is None:
                 current_size = widget.font().pointSizeF()
                 widget.setProperty(
-                    "fluentBasePointSize", current_size if current_size > 0 else base_size
+                    "fluentBasePointSize",
+                    (current_size * base_size / previous_size) if current_size > 0 else base_size,
                 )
-        app_font = QFont("Microsoft YaHei UI")
+        western = self.western_font_combo.currentText() if hasattr(self, "western_font_combo") else "Segoe UI"
+        chinese = self.chinese_font_combo.currentText() if hasattr(self, "chinese_font_combo") else "Microsoft YaHei UI"
+        app_font = QFont()
+        app_font.setFamilies([western, chinese])
         app_font.setPointSize(point_size)
         app.setFont(app_font)
         for widget in widgets:
             font = widget.font()
             baseline = widget.property("fluentBasePointSize")
             font.setPointSizeF(max(8.0, float(baseline) * point_size / base_size))
-            font.setFamily("Microsoft YaHei UI")
+            font.setFamilies([western, chinese])
             widget.setFont(font)
+        self._current_font_point_size = int(point_size)
         self._sync_matplotlib_theme(
             self.property("theme") == "dark" if self.property("theme") else self._system_is_dark()
         )
@@ -560,10 +675,12 @@ class WindowShellMixin:
         import matplotlib as mpl
 
         size = self.font_size_spin.value() if hasattr(self, "font_size_spin") else 10
+        western = self.western_font_combo.currentText() if hasattr(self, "western_font_combo") else "Segoe UI"
+        chinese = self.chinese_font_combo.currentText() if hasattr(self, "chinese_font_combo") else "Microsoft YaHei UI"
         background = "#202124" if dark else "#f3f3f3"
         foreground = "#e8e8e8" if dark else "#202020"
         mpl.rcParams.update({
-            "font.family": ["Microsoft YaHei UI", "Microsoft YaHei", "sans-serif"],
+            "font.family": [western, chinese, "sans-serif"],
             "font.size": size,
             "figure.facecolor": background,
             "axes.facecolor": background,
@@ -786,6 +903,7 @@ class WindowShellMixin:
             (self.backup_thread and self.backup_thread.isRunning())
             or (self.image_upload_thread and self.image_upload_thread.isRunning())
             or (self.potplayer_install_thread and self.potplayer_install_thread.isRunning())
+            or (self.ffmpeg_install_thread and self.ffmpeg_install_thread.isRunning())
             or (self.update_prepare_thread and self.update_prepare_thread.isRunning())
             or
             self.task
@@ -799,18 +917,48 @@ class WindowShellMixin:
         answer = QMessageBox.question(
             self,
             self._t("传输正在进行"),
-            self._t("当前有任务在进行，是否终止所有任务并关闭？"),
+            self._t("当前有任务在进行，是否停止任务、保留断点和队列记录后关闭？"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         return answer == QMessageBox.StandardButton.Yes
 
     def _shutdown_services(self) -> None:
+        self._shutting_down = True
+        self._save_transfer_queues()
+        for item in self.upload_items:
+            if item.status not in {"uploading", "paused"}:
+                continue
+            key = "upload:" + str(item.path)
+            if key in self._transfer_started:
+                self.transfer_history_store.add(
+                    "upload", str(item.path), "/" + item.target, False,
+                    "程序关闭，断点和队列已保留", self._transfer_started.pop(key),
+                )
+        for spec in self.active_download_specs:
+            path = str(spec.local_path)
+            if path in self._history_recorded:
+                continue
+            self._history_recorded.add(path)
+            self.transfer_history_store.add(
+                "download", spec.remote_path, path, False,
+                "程序关闭，断点和队列已保留",
+                self._transfer_started.pop("download:" + path, time.time()),
+            )
+        self.thumbnail_timer.stop()
+        self.thumbnail_queue.clear()
+        if self.thumbnail_task and self.thumbnail_task.isRunning():
+            self.thumbnail_task.requestInterruption()
+            self.thumbnail_task.wait(60000)
         if self.download_runner:
             try:
                 self.download_runner.stop()
             except Exception:
                 pass
+        if isinstance(self.task, DownloadThread) and self.task.isRunning():
+            if not self.task.wait(15000):
+                self.task.terminate()
+                self.task.wait(3000)
         if self.webdav:
             self.webdav.stop()
             self.webdav = None
@@ -825,6 +973,8 @@ class WindowShellMixin:
             self.image_upload_thread.wait(3000)
         if self.potplayer_install_thread and self.potplayer_install_thread.isRunning():
             self.potplayer_install_thread.wait(3000)
+        if self.ffmpeg_install_thread and self.ffmpeg_install_thread.isRunning():
+            self.ffmpeg_install_thread.wait(3000)
         if self.update_check_thread and self.update_check_thread.isRunning():
             self.update_check_thread.requestInterruption()
             self.update_check_thread.wait(3000)
@@ -834,14 +984,31 @@ class WindowShellMixin:
         if self.global_search_task and self.global_search_task.isRunning():
             self.global_search_task.requestInterruption()
             self.global_search_task.wait(3000)
-        self.resource_monitor.close()
+        if isinstance(self.task, UploadThread) and self.task.isRunning():
+            self.task.cancel()
+            if not self.task.wait(15000):
+                self.task.terminate()
+                self.task.wait(3000)
+        self._save_transfer_queues()
+        self.settings.sync()
+        if self.resource_monitor is not None:
+            self.resource_monitor.close()
         self.media_proxy.stop()
         if hasattr(self, "tray_icon"):
             self.tray_icon.hide()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.skin_background_layer.setGeometry(self.rect())
+        self.skin_background_layer.lower()
         QTimer.singleShot(0, self._apply_window_effects)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "skin_background_layer"):
+            self.skin_background_layer.setGeometry(self.rect())
+            self.skin_background_layer.lower()
+        self._update_status_note_width()
 
     def closeEvent(self, event) -> None:
         behavior = "close" if self._force_close else str(self.close_behavior_combo.currentData())

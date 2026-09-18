@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -10,4 +11,6 @@ from modelscope_manager.app import run
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    # The window shutdown path already flushes settings and stops child
+    # processes.  Do not let a third-party HTTP worker keep pythonw.exe alive.
+    os._exit(run())

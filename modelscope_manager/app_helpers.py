@@ -64,8 +64,8 @@ def local_path_identity(path: str | Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 def running_download_percent(completed: int, total: int) -> int:
-    """Reserve 100% for the download-completed callback."""
-    return min(99, int(completed * 100 / max(1, total)))
+    """Return the byte-accurate percentage for the download phase."""
+    return min(100, int(completed * 100 / max(1, total)))
 
 def is_supported_image_file(path: Path) -> bool:
     return (

@@ -9,6 +9,7 @@ from modelscope_manager.service import (
     DATASET_FILE_PAGE_SIZE,
     ModelScopeService,
     ModelScopeWebService,
+    MultiAccountService,
     RemoteEntry,
     Repository,
     normalize_remote_path,
@@ -73,6 +74,29 @@ class UploadTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_verify_accepts_preproduction_username_fields(self):
+        service = ModelScopeService.__new__(ModelScopeService)
+        user = type("User", (), {"username": None})()
+        service.api = MagicMock()
+        service.api.whoami.return_value = user
+        service.api.openapi.get_current_user.return_value = {"name": "alice"}
+
+        self.assertEqual(service.verify(), "alice")
+        self.assertEqual(user.username, "alice")
+
+    def test_multi_account_prefers_token_service_for_webdav_reads(self):
+        repo = Repository("alice/demo", "dataset")
+        web_service = MagicMock()
+        web_service.token = ""
+        token_service = MagicMock()
+        token_service.token = "ms-test"
+        service = MultiAccountService(
+            {"web:alice": web_service, "token-alice": token_service},
+            {"web:alice": [repo], "token-alice": [repo]},
+        )
+
+        self.assertIs(service._for(repo), token_service)
+
     def test_web_service_uses_saved_browser_session_without_exposing_it_as_token(self):
         from modelscope_manager.web_session import ModelScopeWebSession
 

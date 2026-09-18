@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import time
+from dataclasses import replace
+from datetime import datetime
 from PySide6.QtCore import QDateTime, QTimer, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox, QTableWidgetItem
 from pathlib import Path
-from .app_helpers import format_eta, format_size, format_speed, local_path_identity, running_download_percent
+from .app_helpers import PUBLIC_ACCOUNT_ID, format_eta, format_size, format_speed, local_path_identity, running_download_percent
 from .app_workers import DownloadThread, UploadQueueItem, UploadThread
 from .backup import LocalBackupFile
 from .download_service import Aria2DownloadRunner, DownloadSpec, build_download_specs
@@ -49,15 +52,55 @@ class TransfersMixin:
                 entry,
                 Path(destination),
             )
+            account_id = PUBLIC_ACCOUNT_ID if self.selected_repo_public else str(self.active_account_id or "")
+            specs = [replace(spec, account_id=account_id, repo_type=repo.repo_type, repo_id=repo.repo_id) for spec in specs]
         except Exception as exc:
             QMessageBox.warning(self, self._t("无法添加下载"), str(exc))
             return
         if not specs:
             QMessageBox.information(self, self._t("空文件夹"), self._t("所选目录中没有可下载的文件。"))
             return
+        specs = self._resolve_download_conflicts(specs)
+        if not specs:
+            return
         self._enqueue_download_specs(specs)
 
-    def _enqueue_download_specs(self, specs: list[DownloadSpec], auto_start_delay_ms: int = 0) -> int:
+    def _resolve_download_conflicts(self, specs: list[DownloadSpec]) -> list[DownloadSpec]:
+        conflicts = [
+            spec for spec in specs
+            if spec.local_path.exists() or Path(str(spec.local_path) + ".aria2").exists()
+        ]
+        if not conflicts:
+            return specs
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self._t("检测到同名文件"))
+        box.setText(self._tf(
+            "检测到本地存在 {count} 个同名文件，是否覆盖？", count=len(conflicts),
+        ))
+        box.setInformativeText(self._t(
+            "恢复模式会先比较大小并校验 SHA-256；已一致的文件直接跳过，部分文件交给 aria2 尝试断点续传。"
+        ))
+        overwrite_button = box.addButton(self._t("强制覆盖"), QMessageBox.ButtonRole.DestructiveRole)
+        resume_button = box.addButton(self._t("恢复模式"), QMessageBox.ButtonRole.AcceptRole)
+        skip_button = box.addButton(self._t("不覆盖"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(resume_button)
+        box.exec()
+        chosen = box.clickedButton()
+        conflict_paths = {str(spec.local_path).casefold() for spec in conflicts}
+        if chosen is overwrite_button:
+            return [replace(spec, conflict_mode="overwrite") for spec in specs]
+        if chosen is resume_button:
+            return [replace(spec, conflict_mode="resume") for spec in specs]
+        if chosen is skip_button:
+            kept = [spec for spec in specs if str(spec.local_path).casefold() not in conflict_paths]
+            self._log(f"已跳过 {len(specs) - len(kept)} 个本地同名文件")
+            return kept
+        return []
+
+    def _enqueue_download_specs(
+        self, specs: list[DownloadSpec], auto_start_delay_ms: int = 0, *, auto_start: bool = True,
+    ) -> int:
         known = {str(spec.local_path).lower(): index for index, spec in enumerate(self.download_specs)}
         added = 0
         for spec in specs:
@@ -91,7 +134,8 @@ class TransfersMixin:
         self.queue_tabs.setCurrentIndex(1)
         self._update_download_enabled()
         self._log(f"已添加 {added} 个文件到下载队列")
-        if added:
+        self._save_transfer_queues()
+        if added and auto_start:
             QTimer.singleShot(auto_start_delay_ms, self._auto_start_download)
         return added
 
@@ -142,6 +186,7 @@ class TransfersMixin:
             added += 1
         self._render_upload_queue()
         self._update_upload_enabled()
+        self._save_transfer_queues()
         return added
 
     def clear_queue(self) -> None:
@@ -150,6 +195,7 @@ class TransfersMixin:
         ]
         self._render_upload_queue()
         self._update_upload_enabled()
+        self._save_transfer_queues()
 
     def _render_upload_queue(self) -> None:
         self.queue_table.setRowCount(0)
@@ -202,6 +248,7 @@ class TransfersMixin:
             status_item.setForeground(QColor("#c42b1c"))
         else:
             status_item.setForeground(self.queue_table.palette().color(QPalette.ColorRole.Text))
+        self._save_transfer_queues()
 
     def clear_download_queue(self) -> None:
         if self.task and self.task.isRunning():
@@ -214,6 +261,61 @@ class TransfersMixin:
         self.download_progress.setValue(0)
         self.download_stats.setText(self._t("速度：-- · 剩余：--"))
         self._update_download_enabled()
+        self._save_transfer_queues()
+
+    def _save_transfer_queues(self) -> None:
+        if getattr(self, "_restoring_settings", False):
+            return
+        uploads = [
+            {
+                "path": str(item.path), "target": item.target,
+                "status": "waiting" if item.status in {"uploading", "paused"} else item.status,
+                "completed_files": [str(path) for path in item.completed_files],
+            }
+            for item in self.upload_items if item.status not in {"completed", "cancelled"}
+        ]
+        downloads = [
+            {
+                "remote_path": spec.remote_path, "local_path": str(spec.local_path), "url": spec.url,
+                "size": spec.size, "sha256": spec.sha256, "account_id": spec.account_id,
+                "repo_type": spec.repo_type, "repo_id": spec.repo_id,
+                "conflict_mode": spec.conflict_mode,
+            }
+            for spec in self.download_specs
+            if self.download_states.get(str(spec.local_path), "waiting") != "completed"
+        ]
+        self.settings.setValue("transfer/pending_uploads", json.dumps(uploads, ensure_ascii=False))
+        self.settings.setValue("transfer/pending_downloads", json.dumps(downloads, ensure_ascii=False))
+
+    def _restore_transfer_queues(self) -> None:
+        try:
+            uploads = json.loads(str(self.settings.value("transfer/pending_uploads", "[]")))
+            downloads = json.loads(str(self.settings.value("transfer/pending_downloads", "[]")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        for item in uploads:
+            path = Path(str(item.get("path", "")))
+            if path.exists():
+                queue_item = UploadQueueItem(path, str(item.get("target", "")), "waiting")
+                queue_item.completed_files = {Path(value) for value in item.get("completed_files", [])}
+                self.upload_items.append(queue_item)
+        specs = []
+        for item in downloads:
+            if not item.get("url") or not item.get("remote_path"):
+                continue
+            specs.append(DownloadSpec(
+                str(item["remote_path"]), Path(str(item.get("local_path", ""))), str(item["url"]),
+                int(item.get("size", 0)), str(item.get("sha256", "")), "",
+                str(item.get("account_id", "")), str(item.get("repo_type", "")), str(item.get("repo_id", "")),
+                str(item.get("conflict_mode", "resume")),
+            ))
+        if specs:
+            # A private account may not be connected yet during startup. Keep
+            # restored downloads ready instead of failing before login finishes.
+            self._enqueue_download_specs(specs, auto_start=False)
+        self._render_upload_queue()
+        self._update_upload_enabled()
+        self._save_transfer_queues()
 
     def _update_upload_enabled(self) -> None:
         active = bool(
@@ -251,12 +353,9 @@ class TransfersMixin:
             self.current_upload_speed if active_upload else 0,
             self.current_download_speed if active_download else 0,
         )
-        self.status_upload_speed.setText(
-            f"↑ {format_speed(self.current_upload_speed if active_upload else 0)}"
-        )
-        self.status_download_speed.setText(
-            f"↓ {format_speed(self.current_download_speed if active_download else 0)}"
-        )
+        self.settings.setValue("statistics/lifetime_upload_bytes", self.lifetime_upload_bytes)
+        self.settings.setValue("statistics/lifetime_download_bytes", self.lifetime_download_bytes)
+        self._refresh_theme_notes()
         if self.upload_health_monitor.update(
             time.monotonic(), self.current_upload_speed, active_upload,
         ):
@@ -308,6 +407,21 @@ class TransfersMixin:
         self.upload_chart.set_data(samples, start, end)
         self.download_chart.set_data(samples, start, end)
 
+    def _refresh_transfer_history(self) -> None:
+        if not hasattr(self, "transfer_history_table"):
+            return
+        records = self.transfer_history_store.list()
+        self.transfer_history_table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            values = (
+                "上传" if record.direction == "upload" else "下载",
+                record.source, record.destination, "成功" if record.success else "失败",
+                format_eta(record.duration), datetime.fromtimestamp(record.completed_at).strftime("%Y-%m-%d %H:%M:%S"),
+                record.message,
+            )
+            for column, value in enumerate(values):
+                self.transfer_history_table.setItem(row, column, QTableWidgetItem(str(value)))
+
     def start_upload(self) -> None:
         if isinstance(self.task, UploadThread) and self.task.isRunning():
             return
@@ -339,6 +453,8 @@ class TransfersMixin:
         self._start_next_upload()
 
     def _start_next_upload(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         if self.task and self.task.isRunning():
             return
         item = next((item for item in self.upload_items if item.status == "waiting"), None)
@@ -386,6 +502,7 @@ class TransfersMixin:
         self._update_upload_enabled()
         self._update_download_enabled()
         self._log(f"开始上传 {item.path.name} 到 /{item.target}")
+        self._transfer_started["upload:" + str(item.path)] = time.time()
         worker.start()
 
     def _upload_progress_info(self, path: str, percent: int, speed: float, eta: int) -> None:
@@ -400,7 +517,10 @@ class TransfersMixin:
                 break
 
     def _record_upload_bytes(self, amount: int) -> None:
+        amount = max(0, int(amount))
         self.transfer_statistics.add_bytes(time.time(), upload=amount)
+        self.session_upload_bytes += amount
+        self.lifetime_upload_bytes += amount
 
     def _upload_reconnect_ready(self, path: str) -> None:
         for item in self.upload_items:
@@ -416,14 +536,31 @@ class TransfersMixin:
                 self.upload_failed += int(not success)
                 break
         self._log(f"{'完成' if success else '失败'}：{Path(path).name} · {message}")
+        destination = "/" + next((item.target for item in self.upload_items if str(item.path) == path), "")
+        self.transfer_history_store.add(
+            "upload", path, destination, success, message,
+            self._transfer_started.pop("upload:" + path, time.time()),
+        )
+        self._refresh_transfer_history()
 
     def _upload_cancelled(self, path: str) -> None:
+        shutting_down = bool(getattr(self, "_shutting_down", False))
         for item in self.upload_items:
             if str(item.path) == path and item.status in {"uploading", "paused"}:
-                self._set_upload_status(item, "cancelled")
-                self.upload_cancelled += 1
+                self._set_upload_status(item, "waiting" if shutting_down else "cancelled")
+                if not shutting_down:
+                    self.upload_cancelled += 1
                 break
-        self._log(f"已取消：{Path(path).name}")
+        message = "程序关闭，断点和队列已保留" if shutting_down else "已取消"
+        self._log(f"{'已中断' if shutting_down else '已取消'}：{Path(path).name}")
+        destination = "/" + next((item.target for item in self.upload_items if str(item.path) == path), "")
+        history_key = "upload:" + path
+        if not shutting_down or history_key in self._transfer_started:
+            self.transfer_history_store.add(
+                "upload", path, destination, False, message,
+                self._transfer_started.pop(history_key, time.time()),
+            )
+        self._refresh_transfer_history()
 
     def _upload_thread_finished(self, worker: UploadThread) -> None:
         if self.task is worker:
@@ -508,6 +645,13 @@ class TransfersMixin:
     def _start_download_specs(self, specs: list[DownloadSpec]) -> None:
         if not specs or (self.task and self.task.isRunning()):
             return
+        specs = [
+            replace(
+                spec,
+                token=str(getattr(self.account_services.get(spec.account_id), "token", "") or spec.token),
+            )
+            for spec in specs
+        ]
         aria2_path = Path(__file__).resolve().parent.parent / "runtime" / "tools" / "aria2-next.exe"
         try:
             tuning = self._aria2_tuning()
@@ -521,12 +665,16 @@ class TransfersMixin:
         )
         self.download_runner = runner
         self.current_download_speed = 0.0
-        self._download_stat_last_completed = sum(
-            min(spec.size, spec.local_path.stat().st_size)
-            for spec in specs if spec.local_path.exists()
-        )
+        self._download_stat_last_completed = 0
+        self._download_stat_initialized = False
+        self._download_verify_progress = {str(spec.local_path): 0 for spec in specs}
+        self._download_verify_totals = {str(spec.local_path): max(0, spec.size) for spec in specs}
         self.active_download_specs = list(specs)
+        for spec in specs:
+            self._history_recorded.discard(str(spec.local_path))
+            self._transfer_started["download:" + str(spec.local_path)] = time.time()
         self.download_progress.setValue(0)
+        self.download_progress.setFormat("0%-下载")
         self.download_stats.setText(self._t("速度：0 B/s · 剩余：--"))
         active_paths = {str(spec.local_path) for spec in specs}
         for row, spec in enumerate(self.download_specs):
@@ -595,14 +743,20 @@ class TransfersMixin:
 
     def _download_progress_info(self, completed: int, total: int, speed: float, eta: int) -> None:
         self.current_download_speed = max(0.0, speed)
-        downloaded = max(0, completed - self._download_stat_last_completed)
-        self._download_stat_last_completed = max(self._download_stat_last_completed, completed)
+        if not self._download_stat_initialized:
+            downloaded = 0
+            self._download_stat_last_completed = max(0, completed)
+            self._download_stat_initialized = True
+        else:
+            downloaded = max(0, completed - self._download_stat_last_completed)
+            self._download_stat_last_completed = max(self._download_stat_last_completed, completed)
         if downloaded:
             self.transfer_statistics.add_bytes(time.time(), download=downloaded)
+            self.session_download_bytes += downloaded
+            self.lifetime_download_bytes += downloaded
         percent = running_download_percent(completed, total)
-        # Completion owns the 100% state.  A running snapshot may briefly report
-        # all bytes before aria2 and checksum verification have actually finished.
         self.download_progress.setValue(percent)
+        self.download_progress.setFormat(f"{percent}%-下载")
         self.download_stats.setText(self._tf("速度：{speed} · 剩余：{eta}", speed=format_speed(speed), eta=format_eta(eta)))
 
     def _download_item_update(self, local_path: str, state: str, completed: int, total: int, message: str) -> None:
@@ -614,23 +768,32 @@ class TransfersMixin:
             if local_path != canonical_path:
                 self.download_states.pop(local_path, None)
             status = self.download_table.item(row, 2)
-            percent = int(completed * 100 / total) if total > 0 else 0
+            percent = min(100, max(0, int(completed * 100 / total))) if total > 0 else 0
             labels = {
                 "waiting": self._t("等待下载"),
-                "downloading": f"{percent}% · {self._t(message)}",
+                "downloading": f"{percent}%-{self._t('下载')}",
                 "paused": self._tf("{percent}% · 已暂停", percent=percent),
-                "verifying": self._t("正在校验"),
-                "completed": self._t("完成 · 校验通过"),
+                "verifying": f"{percent}%-{self._t('校验')}",
+                "completed": f"100%-{self._t('校验')}",
                 "failed": self._tf("失败 · {message}", message=self._t(message)),
                 "stopped": self._tf("已停止 · {percent}%（可继续）", percent=percent),
             }
             status.setText(labels.get(state, message))
             status.setToolTip(message)
+            if state == "verifying":
+                self._download_verify_progress[canonical_path] = min(max(0, completed), max(0, total))
+                self._download_verify_totals[canonical_path] = max(0, total)
+                verify_total = sum(self._download_verify_totals.values())
+                verified = sum(self._download_verify_progress.get(str(item.local_path), 0) for item in self.active_download_specs)
+                verify_percent = int(verified * 100 / max(1, verify_total))
+                self.download_progress.setValue(min(100, verify_percent))
+                self.download_progress.setFormat(f"{min(100, verify_percent)}%-{self._t('校验')}")
             if state in {"completed", "failed", "stopped"}:
                 color = "#0f7b0f" if state == "completed" else ("#9a6700" if state == "stopped" else "#c42b1c")
                 status.setForeground(QColor(color))
             else:
                 status.setForeground(self.download_table.palette().color(QPalette.ColorRole.Text))
+            self._save_transfer_queues()
             if state == "completed":
                 job_id = self.backup_sync_job_paths.pop(canonical_path, "")
                 job = next((candidate for candidate in self.backup_jobs if candidate.job_id == job_id), None)
@@ -648,6 +811,16 @@ class TransfersMixin:
                         pass
                 if self.potplayer_install_archive and local_file.resolve() == self.potplayer_install_archive.resolve():
                     QTimer.singleShot(0, lambda media=local_file: self._start_potplayer_extraction(media))
+                ffmpeg_archive = getattr(self, "ffmpeg_install_archive", None)
+                if ffmpeg_archive and local_file.resolve() == ffmpeg_archive.resolve():
+                    QTimer.singleShot(0, lambda media=local_file: self._start_ffmpeg_extraction(media))
+            if state in {"completed", "failed", "stopped"} and canonical_path not in self._history_recorded:
+                self._history_recorded.add(canonical_path)
+                self.transfer_history_store.add(
+                    "download", spec.remote_path, canonical_path, state == "completed", message,
+                    self._transfer_started.pop("download:" + canonical_path, time.time()),
+                )
+                self._refresh_transfer_history()
             break
 
     def _download_completed(self, ok: int, failed: int) -> None:
@@ -664,6 +837,7 @@ class TransfersMixin:
             self.download_stats.setText(self._t("已停止 · 已下载内容和断点已保留"))
         else:
             self.download_progress.setValue(100)
+            self.download_progress.setFormat(f"100%-{self._t('校验')}")
             self.download_stats.setText(self._t("速度：0 B/s · 剩余：00:00"))
         self._update_upload_enabled()
         self._update_download_enabled()
@@ -683,6 +857,14 @@ class TransfersMixin:
             path = str(spec.local_path)
             if self.download_states.get(path) not in {"completed", "stopped"}:
                 self.download_states[path] = "failed"
+            if path not in self._history_recorded:
+                self._history_recorded.add(path)
+                self.transfer_history_store.add(
+                    "download", spec.remote_path, path, False, error,
+                    self._transfer_started.pop("download:" + path, time.time()),
+                )
+        self._refresh_transfer_history()
+        self._save_transfer_queues()
         self.task = None
         self.download_runner = None
         self.current_download_speed = 0.0

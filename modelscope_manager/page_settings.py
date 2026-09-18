@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QSlider, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon as FIF, ScrollArea as FluentScrollArea, SettingCardGroup, SpinBox as FluentSpinBox, ToolButton
 from . import __version__
 from .fluent_ui import CleanComboBox, ControlSettingCard, FluentSwitchButton, PanelSettingCard
@@ -168,21 +169,7 @@ class SettingsPageMixin:
         self.builtin_player_enabled.setChecked(True)
         self.builtin_player_enabled.toggled.connect(self._builtin_player_setting_changed)
         player_layout.addWidget(self.builtin_player_enabled)
-        player_layout.addWidget(QLabel(
-            "播放器不随程序预装。点击下载后将使用内置 aria2-next 获取并校验 PotPlayer.7z，再通过 7z-zstd 解压到本地。",
-            objectName="subtitle",
-        ))
-        player_install_row = QHBoxLayout()
-        self.potplayer_install_button = QPushButton("下载并安装 PotPlayer", objectName="primary")
-        self.potplayer_install_button.clicked.connect(self.install_potplayer_from_modelscope)
-        player_install_row.addWidget(self.potplayer_install_button)
-        self.potplayer_folder_button = QPushButton("打开播放器目录")
-        self.potplayer_folder_button.clicked.connect(self.open_potplayer_folder)
-        player_install_row.addWidget(self.potplayer_folder_button)
-        player_install_row.addStretch()
-        player_layout.addLayout(player_install_row)
-        self.builtin_player_status = QLabel("PotPlayer：正在检查", objectName="subtitle")
-        player_layout.addWidget(self.builtin_player_status)
+        player_layout.addWidget(QLabel("PotPlayer 的下载与更新已移至“插件下载”。", objectName="subtitle"))
         player_heading = QHBoxLayout()
         self.player_heading_label = QLabel("第三方播放器", objectName="section")
         player_heading.addWidget(self.player_heading_label, 0, Qt.AlignmentFlag.AlignTop)
@@ -207,6 +194,53 @@ class SettingsPageMixin:
         self.player_table.setMaximumHeight(150)
         self.player_table.itemChanged.connect(self._players_edited)
         player_layout.addWidget(self.player_table)
+
+        plugin_card = QFrame(objectName="card")
+        plugin_layout = QVBoxLayout(plugin_card)
+        plugin_layout.setContentsMargins(20, 18, 20, 20)
+        plugin_layout.addWidget(QLabel("插件下载", objectName="panelTitle"))
+        plugin_layout.addWidget(QLabel("插件通过内置下载队列获取、校验后解压到软件目录。", objectName="subtitle"))
+        self.plugin_table = QTableWidget(2, 4)
+        self.plugin_table.setHorizontalHeaderLabels(["插件", "用途", "状态", "操作"])
+        self.plugin_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.plugin_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.plugin_table.verticalHeader().setVisible(False)
+        self.plugin_table.verticalHeader().setDefaultSectionSize(48)
+        self.plugin_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.plugin_table.horizontalHeader().setStretchLastSection(True)
+        self.plugin_table.setColumnWidth(0, 130)
+        self.plugin_table.setColumnWidth(1, 260)
+        self.plugin_table.setColumnWidth(2, 160)
+        self.plugin_table.setMinimumHeight(145)
+        self.plugin_table.setItem(0, 0, QTableWidgetItem("PotPlayer"))
+        self.plugin_table.setItem(0, 1, QTableWidgetItem("本地视频 / 图片播放"))
+        self.builtin_player_status = QLabel("PotPlayer：正在检查", objectName="subtitle")
+        self.plugin_table.setCellWidget(0, 2, self.builtin_player_status)
+        potplayer_actions = QWidget()
+        potplayer_actions_layout = QHBoxLayout(potplayer_actions)
+        potplayer_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.potplayer_install_button = QPushButton("下载并安装", objectName="primary")
+        self.potplayer_install_button.clicked.connect(self.install_potplayer_from_modelscope)
+        potplayer_actions_layout.addWidget(self.potplayer_install_button)
+        self.potplayer_folder_button = QPushButton("打开目录")
+        self.potplayer_folder_button.clicked.connect(self.open_potplayer_folder)
+        potplayer_actions_layout.addWidget(self.potplayer_folder_button)
+        self.plugin_table.setCellWidget(0, 3, potplayer_actions)
+        self.plugin_table.setItem(1, 0, QTableWidgetItem("FFmpeg"))
+        self.plugin_table.setItem(1, 1, QTableWidgetItem("图床 AVIF 自动转换与媒体处理"))
+        self.ffmpeg_status = QLabel("FFmpeg：正在检查", objectName="subtitle")
+        self.plugin_table.setCellWidget(1, 2, self.ffmpeg_status)
+        ffmpeg_actions = QWidget()
+        ffmpeg_actions_layout = QHBoxLayout(ffmpeg_actions)
+        ffmpeg_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.ffmpeg_install_button = QPushButton("下载并安装", objectName="primary")
+        self.ffmpeg_install_button.clicked.connect(self.install_ffmpeg_from_modelscope)
+        ffmpeg_actions_layout.addWidget(self.ffmpeg_install_button)
+        self.ffmpeg_folder_button = QPushButton("打开目录")
+        self.ffmpeg_folder_button.clicked.connect(self.open_ffmpeg_folder)
+        ffmpeg_actions_layout.addWidget(self.ffmpeg_folder_button)
+        self.plugin_table.setCellWidget(1, 3, ffmpeg_actions)
+        plugin_layout.addWidget(self.plugin_table)
 
         aria_card = QFrame(objectName="card")
         aria_layout = QVBoxLayout(aria_card)
@@ -361,30 +395,135 @@ class SettingsPageMixin:
         theme_card = QFrame(objectName="card")
         theme_layout = QVBoxLayout(theme_card)
         theme_layout.setContentsMargins(20, 18, 20, 20)
-        theme_layout.addWidget(QLabel("主题设置", objectName="section"))
-        self.gpu_acceleration_checkbox = FluentSwitchButton()
-        self.gpu_acceleration_checkbox.toggled.connect(self._graphics_settings_changed)
-        theme_layout.addWidget(self.gpu_acceleration_checkbox)
-        self.acrylic_checkbox = FluentSwitchButton()
-        self.acrylic_checkbox.toggled.connect(self._graphics_settings_changed)
-        theme_layout.addWidget(self.acrylic_checkbox)
+        theme_layout.setSpacing(12)
+        skin_row = QHBoxLayout()
+        skin_row.addWidget(QLabel("当前皮肤"))
+        self.skin_selector_combo = CleanComboBox()
+        self.skin_selector_combo.setMinimumWidth(180)
+        self.skin_selector_combo.currentIndexChanged.connect(self._switch_skin)
+        skin_row.addWidget(self.skin_selector_combo)
+        skin_row.addSpacing(18)
+        skin_row.addWidget(QLabel("皮肤名称"))
+        self.skin_name_edit = QLineEdit()
+        self.skin_name_edit.setMaximumWidth(240)
+        self.skin_name_edit.editingFinished.connect(self._skin_name_changed)
+        skin_row.addWidget(self.skin_name_edit)
+        skin_row.addStretch()
+        theme_layout.addLayout(skin_row)
+
         theme_row = QHBoxLayout()
-        theme_row.addWidget(QLabel("颜色主题"))
+        theme_row.addWidget(QLabel("颜色模式"))
         self.theme_combo = CleanComboBox()
+        self.theme_combo.addItem("亮色", userData="light")
+        self.theme_combo.addItem("暗色", userData="dark")
         self.theme_combo.addItem("跟随系统", userData="system")
-        self.theme_combo.addItem("浅色", userData="light")
-        self.theme_combo.addItem("深色", userData="dark")
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
         theme_row.addWidget(self.theme_combo)
+        theme_row.addSpacing(18)
+        theme_row.addWidget(QLabel("主题颜色"))
+        self.skin_color_source_combo = CleanComboBox()
+        self.skin_color_source_combo.addItem("自动根据背景获取", userData="auto")
+        self.skin_color_source_combo.addItem("自定义取色", userData="custom")
+        self.skin_color_source_combo.currentIndexChanged.connect(self._skin_color_source_changed)
+        theme_row.addWidget(self.skin_color_source_combo)
+        self.skin_auto_image_label = QLabel("取色背景")
+        theme_row.addWidget(self.skin_auto_image_label)
+        self.skin_auto_image_combo = CleanComboBox()
+        self.skin_auto_image_combo.currentIndexChanged.connect(self._skin_auto_image_changed)
+        theme_row.addWidget(self.skin_auto_image_combo)
+        self.skin_color_edit = QLineEdit("#0078D4")
+        self.skin_color_edit.setMaximumWidth(100)
+        self.skin_color_edit.editingFinished.connect(self._skin_settings_changed)
+        theme_row.addWidget(self.skin_color_edit)
+        self.skin_color_button = QPushButton("取色")
+        self.skin_color_button.clicked.connect(self._choose_skin_color)
+        theme_row.addWidget(self.skin_color_button)
         theme_row.addStretch()
         theme_layout.addLayout(theme_row)
+
+        self.skin_image_table = QTableWidget(0, 2)
+        self.skin_image_table.setHorizontalHeaderLabels(["图片名称", "应用到页面（页面#亮度）"])
+        self.skin_image_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.skin_image_table.horizontalHeader().setStretchLastSection(True)
+        self.skin_image_table.setColumnWidth(0, 260)
+        self.skin_image_table.setColumnWidth(1, 270)
+        self.skin_image_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.skin_image_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.skin_image_table.setMinimumHeight(180)
+        self.skin_image_table.cellChanged.connect(self._skin_table_changed)
+        self.skin_image_table.itemSelectionChanged.connect(self._skin_selection_changed)
+        theme_layout.addWidget(self.skin_image_table)
+        image_actions = QHBoxLayout()
+        add_skin_image = QPushButton("+")
+        add_skin_image.setToolTip("添加背景图片（单张最大 10 MB）")
+        add_skin_image.clicked.connect(self._choose_skin_background)
+        image_actions.addWidget(add_skin_image)
+        remove_skin_image = QPushButton("−")
+        remove_skin_image.setToolTip("删除选中的背景图片")
+        remove_skin_image.clicked.connect(self._remove_skin_background)
+        image_actions.addWidget(remove_skin_image)
+        self.skin_random_switch = FluentSwitchButton("随机模式（每个页面随机使用已导入图片）")
+        self.skin_random_switch.toggled.connect(self._skin_random_changed)
+        image_actions.addWidget(self.skin_random_switch)
+        image_actions.addStretch()
+        theme_layout.addLayout(image_actions)
+        pack_actions = QHBoxLayout()
+        pack_actions.addStretch()
+        import_skin_pack = QPushButton("导入文件夹")
+        import_skin_pack.clicked.connect(self._import_skin_pack)
+        pack_actions.addWidget(import_skin_pack)
+        import_skin_archive = QPushButton("导入 ZIP/7z")
+        import_skin_archive.clicked.connect(self._import_skin_archive)
+        pack_actions.addWidget(import_skin_archive)
+        export_skin_pack = QPushButton("导出 ZIP")
+        export_skin_pack.clicked.connect(self._export_skin_pack)
+        pack_actions.addWidget(export_skin_pack)
+        theme_layout.addLayout(pack_actions)
+
+        brightness_row = QHBoxLayout()
+        brightness_row.addWidget(QLabel("选中图片亮度"))
+        self.skin_brightness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.skin_brightness_slider.setRange(20, 180)
+        self.skin_brightness_slider.setValue(100)
+        self.skin_brightness_slider.valueChanged.connect(self._skin_brightness_changed)
+        brightness_row.addWidget(self.skin_brightness_slider, 1)
+        brightness_row.addWidget(QLabel("20%–180%"))
+        theme_layout.addLayout(brightness_row)
+        theme_layout.addWidget(QLabel("格式示例：0#50,1#80。页面编号：设置=0；资源管理、资源搜索、传输列表、备份文件夹、图床、WebDAV 映射依次为 1–6。随机模式下页面映射和亮度不生效。", objectName="subtitle"))
+
+        note_grid = QGridLayout()
+        note_grid.addWidget(QLabel("顶部文字"), 0, 0)
+        self.skin_top_note_edit = QLineEdit("ModelScope Manager")
+        self.skin_top_note_edit.editingFinished.connect(self._skin_notes_changed)
+        note_grid.addWidget(self.skin_top_note_edit, 0, 1)
+        note_grid.addWidget(QLabel("底部文字"), 1, 0)
+        self.skin_bottom_note_edit = QLineEdit("上传速度：[US] | 下载速度：[DS]")
+        self.skin_bottom_note_edit.editingFinished.connect(self._skin_notes_changed)
+        note_grid.addWidget(self.skin_bottom_note_edit, 1, 1)
+        theme_layout.addLayout(note_grid)
+        theme_layout.addWidget(QLabel("通配符：[US] [DS] [AU] [AD] [CU] [CD] [VER] [CPU] [RAM] [RT]；使用 | 分隔状态项。", objectName="subtitle"))
+
+        self.gpu_acceleration_checkbox = FluentSwitchButton()
+        self.gpu_acceleration_checkbox.toggled.connect(self._graphics_settings_changed)
+        self.acrylic_checkbox = FluentSwitchButton()
+        self.acrylic_checkbox.toggled.connect(self._graphics_settings_changed)
+        self.graphics_status = QLabel("亚克力效果由 Windows GPU 合成器处理。", objectName="subtitle")
         self.font_size_spin = FluentSpinBox()
         self.font_size_spin.setRange(9, 18)
         self.font_size_spin.setValue(10)
         self.font_size_spin.setSuffix(" pt")
         self.font_size_spin.valueChanged.connect(self._font_size_changed)
-        self.graphics_status = QLabel("亚克力效果由 Windows GPU 合成器处理。", objectName="subtitle")
-        theme_layout.addWidget(self.graphics_status)
+        font_families = QFontDatabase.families()
+        for fallback in ("Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Arial"):
+            if fallback not in font_families:
+                font_families.append(fallback)
+        font_families.sort(key=str.casefold)
+        self.western_font_combo = CleanComboBox()
+        self.western_font_combo.addItems(font_families)
+        self.western_font_combo.currentIndexChanged.connect(self._font_family_changed)
+        self.chinese_font_combo = CleanComboBox()
+        self.chinese_font_combo.addItems(font_families)
+        self.chinese_font_combo.currentIndexChanged.connect(self._font_family_changed)
 
         index_card = QFrame(objectName="card")
         index_layout = QVBoxLayout(index_card)
@@ -534,6 +673,40 @@ class SettingsPageMixin:
         self.alist_stop_button.clicked.connect(self.stop_alist)
         alist_actions.addWidget(self.alist_stop_button)
         alist_layout.addLayout(alist_actions)
+        alist_layout.addWidget(QLabel("Windows 多盘符挂载", objectName="section"))
+        alist_layout.addWidget(QLabel(
+            "每个盘符可独立挂载 /dav 或已在“WebDAV 映射”页面建立的挂载点。挂载操作会请求管理员权限。",
+            objectName="subtitle",
+        ))
+        self.webdav_local_mounts: list[dict[str, str]] = []
+        self.webdav_drive_table = QTableWidget(0, 5)
+        self.webdav_drive_table.setHorizontalHeaderLabels([
+            "盘符", "挂载点", "挂载情况", "管理员身份挂载", "卸载",
+        ])
+        drive_header = self.webdav_drive_table.horizontalHeader()
+        drive_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        drive_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        drive_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        drive_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        drive_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        drive_header.setMinimumSectionSize(70)
+        self.webdav_drive_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.webdav_drive_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.webdav_drive_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.webdav_drive_table.setMinimumHeight(150)
+        alist_layout.addWidget(self.webdav_drive_table)
+        mount_actions = QHBoxLayout()
+        add_drive_mount = QPushButton("＋ 添加盘符映射")
+        add_drive_mount.clicked.connect(self._add_webdav_drive_mapping)
+        mount_actions.addWidget(add_drive_mount)
+        remove_drive_mount = QPushButton("－ 删除所选")
+        remove_drive_mount.clicked.connect(self._remove_webdav_drive_mapping)
+        mount_actions.addWidget(remove_drive_mount)
+        refresh_drive_mount = QPushButton("刷新挂载状态")
+        refresh_drive_mount.clicked.connect(self._refresh_webdav_drive_statuses)
+        mount_actions.addWidget(refresh_drive_mount)
+        mount_actions.addStretch()
+        alist_layout.addLayout(mount_actions)
         self.alist_status = QLabel("未启动", objectName="subtitle")
         alist_layout.addWidget(self.alist_status)
         for control in (self.alist_host_combo, self.alist_port, self.alist_username, self.alist_password):
@@ -560,25 +733,71 @@ class SettingsPageMixin:
             ControlSettingCard(FIF.SCROLL, "滚轮保护", "避免滚动设置页时意外修改数值", self.disable_settings_wheel, trailing_margin=40),
         ))
 
-        appearance_group = SettingCardGroup("个性化", settings_content)
+        appearance_group = SettingCardGroup("外观与字体", settings_content)
         appearance_group.addSettingCards((
-            ControlSettingCard(FIF.PALETTE, "应用主题", "跟随系统，或固定使用浅色/深色主题", self.theme_combo, trailing_margin=40),
             ControlSettingCard(FIF.FONT_SIZE, "全局字号", "同步缩放 Qt、Fluent 控件和 Matplotlib", self.font_size_spin, trailing_margin=40),
+            ControlSettingCard(FIF.FONT_SIZE, "西文字体", "拉丁字母、数字和西文界面的首选字体", self.western_font_combo, trailing_margin=40),
+            ControlSettingCard(FIF.FONT_SIZE, "中文字体", "中文字符回退字体，修改后实时应用", self.chinese_font_combo, trailing_margin=40),
             ControlSettingCard(FIF.SPEED_HIGH, "GPU 加速", "桌面 OpenGL 设置在下次启动后生效", self.gpu_acceleration_checkbox, trailing_margin=40),
             ControlSettingCard(FIF.TRANSPARENT, "Blur 亚克力", "由 Windows 桌面合成器渲染半透明背景", self.acrylic_checkbox, trailing_margin=40),
             ControlSettingCard(FIF.INFO, "渲染状态", "当前窗口合成与背景策略", self.graphics_status, trailing_margin=40),
         ))
 
+        theme_group = SettingCardGroup("主题设置", settings_content)
+        theme_group.addSettingCard(PanelSettingCard(
+            FIF.PALETTE, "多页面自定义主题", "颜色模式、多背景映射、随机背景和状态文字",
+            theme_card, theme_group,
+        ))
+
+        settings_transfer_panel = QFrame()
+        settings_transfer_layout = QHBoxLayout(settings_transfer_panel)
+        settings_transfer_layout.setContentsMargins(18, 14, 18, 14)
+        export_settings_button = QPushButton("导出 INI")
+        export_settings_button.clicked.connect(self._export_settings_ini)
+        settings_transfer_layout.addWidget(export_settings_button)
+        import_settings_button = QPushButton("导入 INI")
+        import_settings_button.clicked.connect(self._import_settings_ini)
+        settings_transfer_layout.addWidget(import_settings_button)
+        settings_transfer_layout.addWidget(QLabel("不包含皮肤、实验性功能、凭据、流量统计和未完成传输队列。", objectName="subtitle"), 1)
+        settings_transfer_group = SettingCardGroup("设置导入导出", settings_content)
+        settings_transfer_group.addSettingCard(PanelSettingCard(
+            FIF.SAVE, "便携设置", "使用 INI 在不同安装之间迁移常规设置",
+            settings_transfer_panel, settings_transfer_group,
+        ))
+
+        integration_panel = QFrame()
+        integration_layout = QVBoxLayout(integration_panel)
+        integration_layout.setContentsMargins(18, 14, 18, 14)
+        shortcut_row = QHBoxLayout()
+        for text, callback in (
+            ("桌面", self.create_desktop_shortcut),
+            ("开始菜单-当前用户", lambda: self.create_start_menu_shortcut(False)),
+            ("开始菜单-所有用户", lambda: self.create_start_menu_shortcut(True)),
+            ("此电脑", self.create_this_pc_shortcut),
+            ("一键清理", self.cleanup_windows_shortcuts),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            shortcut_row.addWidget(button)
+        integration_layout.addLayout(shortcut_row)
+        integration_layout.addWidget(QLabel("所有用户开始菜单会请求管理员权限；其余入口写入当前用户。", objectName="subtitle"))
+        integration_group = SettingCardGroup("Windows 快捷入口", settings_content)
+        integration_group.addSettingCard(PanelSettingCard(FIF.LINK, "系统集成", "桌面、开始菜单与此电脑入口", integration_panel, integration_group))
+
         panel_specs = (
             ("软件更新", FIF.UPDATE, "ModelScope 更新", "从 ARXChem/Software-List 获取最新便携包", update_card),
             ("账号设置", FIF.PEOPLE, "ModelScope 账户", "Token 与网页登录信息使用设备绑定加密保存", token_card),
             ("下载设置", FIF.DOWNLOAD, "下载与传输", "默认目录、aria2-next 分段、SDK 上传队列和共享限速", download_card),
-            ("播放设置", FIF.PLAY, "媒体播放器", "内置 PotPlayer 与第三方播放器", player_card),
+            ("播放设置", FIF.PLAY, "媒体播放器", "默认 PotPlayer 开关与第三方播放器", player_card),
+            ("插件下载", FIF.DOWNLOAD, "可选插件", "下载并安装 PotPlayer、FFmpeg 等可选组件", plugin_card),
             ("索引和预览", FIF.SEARCH, "索引与预览", "后台索引、缩略图和复制阈值", index_card),
             ("资源监控", FIF.SPEED_HIGH, "CPU、内存与显存", "本进程实时占用与后台自动内存回收", resource_card),
         )
         settings_layout.addWidget(basic_group)
         settings_layout.addWidget(appearance_group)
+        settings_layout.addWidget(theme_group)
+        settings_layout.addWidget(settings_transfer_group)
+        settings_layout.addWidget(integration_group)
         for group_title, icon, title, description, panel in panel_specs:
             for label in panel.findChildren(QLabel, options=Qt.FindChildOption.FindDirectChildrenOnly):
                 if label.objectName() == "panelTitle":
@@ -592,7 +811,7 @@ class SettingsPageMixin:
         webdav_group.addSettingCards((
             ControlSettingCard(
                 FIF.CONNECT, "监听端口", "端口冲突时会自动寻找相邻可用端口并立即保存",
-                self.alist_port_control, webdav_group,
+                self.alist_port_control, webdav_group, trailing_margin=40,
             ),
             PanelSettingCard(
                 FIF.GLOBE, "WebDAV 网关", "监听范围、账户凭据与启动状态",

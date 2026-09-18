@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QAction, QDesktopServices, QIcon
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QListWidgetItem, QMenu, QMessageBox, QStyle, QTextEdit, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import quote
@@ -14,7 +12,9 @@ from .app_helpers import MEDIA_EXTENSIONS, PUBLIC_ACCOUNT_ID, format_size, local
 from .app_workers import CopyThread, DeleteThread, RelocateThread, TaskThread, UploadThread
 from .database import AccountRecord, IndexedEntry, classify_file, everything_search_match
 from .image_bed import IMAGE_EXTENSIONS
+from .remote_archive import SUPPORTED_REMOTE_ARCHIVES, probe_archive_listing
 from .service import ModelScopeService, ModelScopeWebService, RemoteEntry, Repository, normalize_remote_path, parse_modelscope_repository_url, repository_directories
+from .storage import SEVEN_ZIP_ZSTD_EXE
 from .web_session import ModelScopeWebSession, delete_repository_file
 
 
@@ -125,6 +125,9 @@ class RemoteActionsMixin:
         paste_action = menu.addAction(self._t("粘贴")) if self.copy_source and not self.selected_repo_public and not multiple else None
         paste_move_action = menu.addAction(self._t("粘贴移动")) if self.move_source and not self.selected_repo_public and not multiple else None
         download_action = menu.addAction(self._t("添加到下载队列"))
+        archive_action = menu.addAction(self._t("远程查看压缩包目录（Range）")) if (
+            not multiple and not entry.is_dir and Path(entry.path).suffix.casefold() in SUPPORTED_REMOTE_ARCHIVES
+        ) else None
         builtin_action = None
         player_actions: dict[QAction, dict[str, str]] = {}
         if not multiple and not entry.is_dir and Path(entry.path).suffix.lower() in MEDIA_EXTENSIONS | IMAGE_EXTENSIONS:
@@ -178,6 +181,8 @@ class RemoteActionsMixin:
         elif chosen is download_action:
             for value in selected:
                 self.add_remote_download(value, service, repo, entries)
+        elif archive_action is not None and chosen is archive_action:
+            self._probe_remote_archive(entry, service, repo)
         elif builtin_action is not None and chosen is builtin_action:
             self.open_builtin_remote(entry, service, repo)
         elif chosen in player_actions:
@@ -207,6 +212,39 @@ class RemoteActionsMixin:
             self._log(f"已选择移动 {len(selected)} 项；请选择目标目录后右键粘贴移动")
         elif chosen is rename_action:
             self._rename_remote_entry(tag_account_id, service, repo, entry, entries)
+
+    def _probe_remote_archive(self, entry: RemoteEntry, service: ModelScopeService, repo: Repository) -> None:
+        def action():
+            url = service.get_download_url(repo, entry.path)
+            get_headers = getattr(service, "get_download_headers", None)
+            headers = get_headers(repo, url) if get_headers else {}
+            return probe_archive_listing(url, headers, entry.size, SEVEN_ZIP_ZSTD_EXE, entry.path)
+
+        worker = TaskThread(action, self)
+        worker.failed.connect(lambda error: QMessageBox.warning(self, "远程压缩包读取失败", error))
+
+        def show_result(result):
+            if not result.supported:
+                QMessageBox.warning(self, "不支持按需读取", result.message)
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle(
+                f"远程压缩包目录 · 已读取 {format_size(result.fetched_bytes)} / {format_size(result.total_bytes)}"
+            )
+            dialog.resize(820, 600)
+            layout = QVBoxLayout(dialog)
+            text = QTextEdit()
+            text.setReadOnly(True)
+            text.setPlainText(result.listing)
+            layout.addWidget(text)
+            detail = QLabel(result.message, objectName="subtitle")
+            detail.setWordWrap(True)
+            layout.addWidget(detail)
+            dialog.exec()
+
+        worker.succeeded.connect(show_result)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _show_paste_menu(
         self, view: QWidget, position, service: ModelScopeService, repo: Repository, destination: str,

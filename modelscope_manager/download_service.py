@@ -25,6 +25,10 @@ class DownloadSpec:
     size: int = 0
     sha256: str = ""
     token: str = ""
+    account_id: str = ""
+    repo_type: str = ""
+    repo_id: str = ""
+    conflict_mode: str = "resume"
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,8 @@ class Aria2DownloadRunner:
         self._rpc_secret = ""
         self._current_specs: list[DownloadSpec] = []
         self._applied_download_limit = -1
+        self._completed_by_path: dict[str, int] = {}
+        self._total_by_path: dict[str, int] = {}
 
     @property
     def paused(self) -> bool:
@@ -237,11 +243,22 @@ class Aria2DownloadRunner:
             spec.local_path.parent.mkdir(parents=True, exist_ok=True)
             item_callback(spec, "waiting", self._local_size(spec), spec.size, "等待下载")
 
+        specs, preverified = self._prepare_existing(specs, item_callback)
+        if not specs:
+            progress_callback(1, 1, 0.0, 0)
+            return preverified, 0
+
         process: subprocess.Popen | None = None
         try:
             self._rpc_port = self._available_port()
             self._rpc_secret = uuid.uuid4().hex
             self._current_specs = list(specs)
+            self._completed_by_path = {
+                os.path.normcase(os.path.abspath(spec.local_path)): 0 for spec in specs
+            }
+            self._total_by_path = {
+                os.path.normcase(os.path.abspath(spec.local_path)): max(0, spec.size) for spec in specs
+            }
             process = subprocess.Popen(
                 self._command(),
                 stdin=subprocess.DEVNULL,
@@ -256,14 +273,25 @@ class Aria2DownloadRunner:
             self._wait_for_rpc(process)
             self._enqueue_specs(specs)
             self._apply_download_limit(force=True)
-            self._rpc("unpauseAll")
             total = max(1, sum(max(0, spec.size) for spec in specs))
+            # Capture aria2's restored .aria2 breakpoint before receiving new
+            # bytes.  The UI can then use it as a statistics baseline instead
+            # of counting old partial data again after a restart.
+            initial_completed, initial_total, _speed, initial_items = self._aria2_snapshot()
+            if initial_completed >= 0:
+                if initial_total > 0:
+                    total = initial_total
+                self._report_items(specs, item_callback, initial_items)
+                progress_callback(min(initial_completed, total), total, 0.0, -1)
+            self._rpc("unpauseAll")
             while process.poll() is None:
                 completed, rpc_total, speed, item_progress = self._aria2_snapshot()
                 if rpc_total > 0:
                     total = rpc_total
                 if completed < 0:
-                    completed = self._report_items(specs, item_callback)
+                    completed = self._report_items(
+                        specs, item_callback, dict(self._completed_by_path),
+                    )
                 else:
                     self._report_items(specs, item_callback, item_progress)
                 eta = int(max(0, total - completed) / speed) if speed > 0 else -1
@@ -293,7 +321,8 @@ class Aria2DownloadRunner:
             progress_callback(min(completed, total), total, 0.0, 0)
             if self.stopped:
                 return self._mark_stopped(specs, item_callback)
-            return self._verify(specs, return_code, item_callback)
+            ok, failed = self._verify(specs, return_code, item_callback)
+            return ok + preverified, failed
         finally:
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -310,22 +339,74 @@ class Aria2DownloadRunner:
         for spec in specs:
             self._rpc("addUri", [[spec.url], self._aria2_options(spec)])
 
+    @staticmethod
+    def _discard_local_state(spec: DownloadSpec) -> None:
+        spec.local_path.unlink(missing_ok=True)
+        Path(str(spec.local_path) + ".aria2").unlink(missing_ok=True)
+
+    def _prepare_existing(
+        self, specs: list[DownloadSpec], callback: ItemCallback,
+    ) -> tuple[list[DownloadSpec], int]:
+        """Apply the user-selected collision policy before aria2 sees files."""
+        pending: list[DownloadSpec] = []
+        verified = 0
+        for spec in specs:
+            if spec.conflict_mode == "overwrite":
+                self._discard_local_state(spec)
+                pending.append(spec)
+                continue
+            if not spec.local_path.is_file():
+                pending.append(spec)
+                continue
+            try:
+                local_size = spec.local_path.stat().st_size
+            except OSError:
+                pending.append(spec)
+                continue
+            if spec.size > 0 and local_size == spec.size and spec.sha256:
+                digest = hashlib.sha256()
+                completed = 0
+                callback(spec, "verifying", 0, spec.size, "正在校验已有文件")
+                with spec.local_path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                        digest.update(chunk)
+                        completed += len(chunk)
+                        callback(spec, "verifying", completed, spec.size, "正在校验已有文件")
+                if digest.hexdigest().casefold() == spec.sha256.casefold():
+                    Path(str(spec.local_path) + ".aria2").unlink(missing_ok=True)
+                    callback(spec, "completed", spec.size, spec.size, "本地文件校验通过，已跳过下载")
+                    verified += 1
+                    continue
+                self._discard_local_state(spec)
+                callback(spec, "waiting", 0, spec.size, "本地文件校验不匹配，将重新下载")
+            elif spec.size > 0 and local_size >= spec.size:
+                # A complete file without a comparable online hash cannot be
+                # trusted as a breakpoint. Start clean instead of letting aria2
+                # accept it as already complete.
+                self._discard_local_state(spec)
+                callback(spec, "waiting", 0, spec.size, "无法校验已有文件，将重新下载")
+            else:
+                callback(spec, "waiting", local_size, spec.size, "发现本地断点，尝试恢复")
+            pending.append(spec)
+        return pending, verified
+
     def _aria2_options(self, spec: DownloadSpec) -> dict:
         segments = self.tuning.segments_for(spec.size)
         options = {
             "dir": str(spec.local_path.parent),
             "out": spec.local_path.name,
             "continue": "true",
+            "always-resume": "true",
             "allow-overwrite": "true",
             "auto-file-renaming": "false",
             "file-allocation": "none",
-            "check-integrity": "true",
+            # aria2's checksum phase does not expose byte progress.  Integrity is
+            # checked below in Python so the UI can show a real verification %.
+            "check-integrity": "false",
             "split": str(segments),
             "max-connection-per-server": str(segments),
             "pause": "true",
         }
-        if spec.sha256:
-            options["checksum"] = f"sha-256={spec.sha256}"
         token = spec.token or self.token
         headers = modelscope_token_headers(spec.url, token, include_session_cookie=True)
         if headers:
@@ -349,10 +430,11 @@ class Aria2DownloadRunner:
         command = [
             str(self.executable),
             "--continue=true",
+            "--always-resume=true",
             "--allow-overwrite=true",
             "--auto-file-renaming=false",
             "--file-allocation=none",
-            "--check-integrity=true",
+            "--check-integrity=false",
             f"--max-concurrent-downloads={concurrent}",
             "--max-connection-per-server=1",
             "--split=1",
@@ -400,13 +482,19 @@ class Aria2DownloadRunner:
             statistics = self._rpc("getGlobalStat")
         except Exception:
             return -1, 0, 0.0, {}
-        completed = sum(int(task.get("completedLength", 0)) for task in tasks)
-        total = sum(int(task.get("totalLength", 0)) for task in tasks)
-        progress: dict[str, int] = {}
+        progress: dict[str, int] = dict(self._completed_by_path)
         for task in tasks:
             files = task.get("files") or []
             if files and files[0].get("path"):
-                progress[os.path.normcase(os.path.abspath(files[0]["path"]))] = int(task.get("completedLength", 0))
+                key = os.path.normcase(os.path.abspath(files[0]["path"]))
+                current = max(0, int(task.get("completedLength", 0)))
+                task_total = max(0, int(task.get("totalLength", 0)))
+                self._completed_by_path[key] = max(self._completed_by_path.get(key, 0), current)
+                if task_total:
+                    self._total_by_path[key] = task_total
+                progress[key] = self._completed_by_path[key]
+        completed = sum(self._completed_by_path.values())
+        total = sum(self._total_by_path.values())
         return completed, total, float(statistics.get("downloadSpeed", 0)), progress
 
     def _report_items(
@@ -418,7 +506,10 @@ class Aria2DownloadRunner:
         completed = 0
         for spec in specs:
             key = os.path.normcase(os.path.abspath(spec.local_path))
-            current = (item_progress or {}).get(key, self._local_size(spec))
+            if item_progress is None:
+                current = self._local_size(spec)
+            else:
+                current = item_progress.get(key, self._completed_by_path.get(key, 0))
             completed += current
             message = "已暂停" if self.paused else "下载中"
             if spec.size > 0 and current >= spec.size:
@@ -435,7 +526,8 @@ class Aria2DownloadRunner:
     def _verify(self, specs: list[DownloadSpec], return_code: int, callback: ItemCallback) -> tuple[int, int]:
         ok = failed = 0
         for spec in specs:
-            callback(spec, "verifying", self._local_size(spec), spec.size, "正在校验")
+            verify_total = spec.size or self._local_size(spec)
+            callback(spec, "verifying", 0, verify_total, "正在校验")
             error = ""
             if not spec.local_path.is_file():
                 error = "文件未生成"
@@ -443,9 +535,12 @@ class Aria2DownloadRunner:
                 error = f"大小不匹配：{spec.local_path.stat().st_size}/{spec.size} 字节"
             elif spec.sha256:
                 digest = hashlib.sha256()
+                verified = 0
                 with spec.local_path.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
                         digest.update(chunk)
+                        verified += len(chunk)
+                        callback(spec, "verifying", verified, verify_total, "正在校验")
                 if digest.hexdigest().lower() != spec.sha256.lower():
                     error = "SHA-256 校验失败"
             elif return_code != 0:
@@ -455,6 +550,7 @@ class Aria2DownloadRunner:
                 failed += 1
                 callback(spec, "failed", self._local_size(spec), spec.size, error)
             else:
+                callback(spec, "verifying", verify_total, verify_total, "正在校验")
                 ok += 1
                 callback(spec, "completed", spec.size, spec.size, "下载完成，校验通过")
         return ok, failed

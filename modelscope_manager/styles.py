@@ -2,7 +2,8 @@ QSS = r"""
 * { font-family: "Microsoft YaHei UI", "Segoe UI"; color: #202020; }
 MainWindow, QMainWindow, QWidget#root,
 QWidget#resourceInterface, QWidget#transferInterface, QWidget#settingsInterface,
-QWidget#searchInterface, QWidget#backupInterface, QWidget#imageInterface { background: #f3f3f3; }
+QWidget#searchInterface, QWidget#backupInterface, QWidget#imageInterface,
+QWidget#webdavMappingInterface { background: #f3f3f3; }
 QScrollArea#settingsScroll, QScrollArea#settingsScroll > QWidget > QWidget, QWidget#settingsContent,
 QScrollArea#statisticsScroll, QScrollArea#statisticsScroll > QWidget > QWidget, QWidget#statisticsContent { background: transparent; border: none; }
 QFrame#fluentSettingsPanel { background: transparent; border: none; }
@@ -49,7 +50,7 @@ QPushButton:disabled { color: #999999; background: #eeeeee; border-color: #ddddd
 QTreeWidget, QListWidget, QTableWidget, QTextEdit { background: #ffffff; border: 1px solid #e2e2e2; border-radius: 7px; selection-background-color: #cce8ff; selection-color: #202020; outline: none; }
 QTreeWidget#repositoryTree::item { min-height: 32px; padding: 2px 4px; }
 QTreeWidget#repositoryTree[detailList="true"]::item { min-height: 32px; padding: 2px 4px 2px 0; }
-QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-right: 7px; }
+QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-left: 7px; margin-right: 7px; }
 QTreeWidget#repositoryTree::item:selected { background: #cce8ff; border-radius: 3px; }
 QHeaderView::section { background: #fafafa; border: none; border-right: 1px solid #d6d6d6; border-bottom: 1px solid #e5e5e5; padding: 7px; font-weight: 600; }
 QTabWidget::pane { border: none; background: transparent; }
@@ -63,7 +64,7 @@ QFrame#dropArea { background: #fafcff; border: 2px dashed #8bbbe8; border-radius
 QFrame#dropArea[dragging="true"] { background: #e8f3fb; border-color: #0067c0; }
 QProgressBar { border: 1px solid #d7d7d7; background: #eeeeee; border-radius: 5px; min-height: 18px; max-height: 18px; text-align: center; color: #202020; font-weight: 600; }
 QProgressBar::chunk { background: #60aee8; border-radius: 4px; }
-QCheckBox { spacing: 7px; }
+QCheckBox { spacing: 7px; padding-left: 4px; }
 QCheckBox::indicator { width: 17px; height: 17px; background: #ffffff; border: 1px solid #777777; border-radius: 3px; }
 QCheckBox::indicator:hover { border-color: #0067c0; background: #f3f9fd; }
 QCheckBox::indicator:checked { background: #0067c0; border-color: #0067c0; image: url(modelscope_manager/assets/check.svg); }
@@ -79,7 +80,8 @@ DARK_QSS = r"""
 * { font-family: "Microsoft YaHei UI", "Segoe UI"; color: #e8e8e8; }
 MainWindow, QMainWindow, QWidget#root,
 QWidget#resourceInterface, QWidget#transferInterface, QWidget#settingsInterface,
-QWidget#searchInterface, QWidget#backupInterface, QWidget#imageInterface { background: #202124; }
+QWidget#searchInterface, QWidget#backupInterface, QWidget#imageInterface,
+QWidget#webdavMappingInterface { background: #202124; }
 QScrollArea#settingsScroll, QScrollArea#settingsScroll > QWidget > QWidget, QWidget#settingsContent,
 QScrollArea#statisticsScroll, QScrollArea#statisticsScroll > QWidget > QWidget, QWidget#statisticsContent { background: transparent; border: none; }
 QFrame#fluentSettingsPanel { background: transparent; border: none; }
@@ -125,7 +127,7 @@ QPushButton:disabled { color: #858991; background: #292c31; border-color: #42464
 QTreeWidget, QListWidget, QTableWidget, QTextEdit { color: #eeeeee; background: #24272c; border: 1px solid #454a53; border-radius: 7px; selection-background-color: #174d73; selection-color: #ffffff; outline: none; }
 QTreeWidget#repositoryTree::item { min-height: 32px; padding: 2px 4px; }
 QTreeWidget#repositoryTree[detailList="true"]::item { min-height: 32px; padding: 2px 4px 2px 0; }
-QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-right: 7px; }
+QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-left: 7px; margin-right: 7px; }
 QTreeWidget#repositoryTree::item:selected { background: #174d73; border-radius: 3px; }
 QHeaderView::section { color: #e8e8e8; background: #30333a; border: none; border-right: 1px solid #4a4f58; border-bottom: 1px solid #4a4f58; padding: 7px; font-weight: 600; }
 QTabWidget::pane { border: none; background: transparent; }
@@ -139,7 +141,7 @@ QFrame#dropArea { background: #223442; border: 2px dashed #4c8fbe; border-radius
 QFrame#dropArea[dragging="true"] { background: #1a465f; border-color: #63b5ed; }
 QProgressBar { border: 1px solid #555b65; background: #30333a; border-radius: 5px; min-height: 18px; max-height: 18px; text-align: center; color: #ffffff; font-weight: 600; }
 QProgressBar::chunk { background: #277db8; border-radius: 4px; }
-QCheckBox { spacing: 7px; }
+QCheckBox { spacing: 7px; padding-left: 4px; }
 QCheckBox::indicator { width: 17px; height: 17px; background: #202226; border: 1px solid #a0a5ad; border-radius: 3px; }
 QCheckBox::indicator:hover { border-color: #63b5ed; background: #293d4c; }
 QCheckBox::indicator:checked { background: #1676b5; border-color: #1676b5; image: url(modelscope_manager/assets/check.svg); }
@@ -164,8 +166,53 @@ QFrame#card { background: rgba(42,45,50,225); }
 """
 
 
-def theme_qss(dark: bool, acrylic: bool = False) -> str:
+def theme_qss(
+    dark: bool,
+    acrylic: bool = False,
+    font_families: tuple[str, str] = ("Segoe UI", "Microsoft YaHei UI"),
+    accent: str = "#0078D4",
+    background_image: str = "",
+) -> str:
     base = DARK_QSS if dark else QSS
-    if not acrylic:
-        return base
-    return base + (ACRYLIC_DARK_QSS if dark else ACRYLIC_LIGHT_QSS)
+    if acrylic:
+        base += ACRYLIC_DARK_QSS if dark else ACRYLIC_LIGHT_QSS
+    western, chinese = (value.replace('"', '') for value in font_families)
+    base = base.replace('* { font-family: "Microsoft YaHei UI", "Segoe UI";', f'* {{ font-family: "{western}", "{chinese}";')
+    custom = f"\nQPushButton#primary {{ background: {accent}; border-color: {accent}; }}\n"
+    custom += f"QProgressBar::chunk {{ background: {accent}; }}\n"
+    if background_image:
+        nav = "rgba(18,19,23,188)" if dark else "rgba(248,249,252,240)"
+        status = "rgba(18,19,23,178)" if dark else "rgba(248,249,252,236)"
+        card = "rgba(28,29,34,204)" if dark else "rgba(255,255,255,207)"
+        table = "rgba(25,26,31,207)" if dark else "rgba(255,255,255,214)"
+        field = "rgba(27,28,33,220)" if dark else "rgba(255,255,255,226)"
+        button = "rgba(46,48,55,220)" if dark else "rgba(250,250,252,226)"
+        header = "rgba(44,46,53,225)" if dark else "rgba(246,247,250,232)"
+        custom += (
+            'QMainWindow, MainWindow, QWidget#root, FluentWindowBase { background: transparent; }\n'
+            'StackedWidget, StackedWidget[isTransparent="true"] { background: transparent; }\n'
+            'QWidget#resourceInterface, QWidget#transferInterface, QWidget#settingsInterface, '
+            'QWidget#searchInterface, QWidget#backupInterface, QWidget#imageInterface, QWidget#webdavMappingInterface '
+            f'{{ background-color: {"#202124" if dark else "#f3f3f3"}; }}\n'
+            'QWidget#resourceInterface[skinBackground="true"], '
+            'QWidget#transferInterface[skinBackground="true"], '
+            'QWidget#settingsInterface[skinBackground="true"], '
+            'QWidget#searchInterface[skinBackground="true"], '
+            'QWidget#backupInterface[skinBackground="true"], '
+            'QWidget#imageInterface[skinBackground="true"], '
+            'QWidget#webdavMappingInterface[skinBackground="true"] { background: transparent; }\n'
+            'QScrollArea, QScrollArea > QWidget > QWidget, QWidget#settingsContent, '
+            'QWidget#statisticsContent { background: transparent; }\n'
+            'NavigationInterface, QFrame#navSidebar, QFrame#sidebar '
+            f'{{ background-color: {nav}; }}\n'
+            f'QStatusBar#fluentStatusBar {{ background-color: {status}; }}\n'
+            'QFrame#card, QFrame#metricCard, QFrame#statsFilterCard, QFrame#statsChartCard '
+            f'{{ background-color: {card}; }}\n'
+            'QTreeWidget, QListWidget, QTableWidget, QTextEdit '
+            f'{{ background-color: {table}; }}\n'
+            'QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QDateTimeEdit '
+            f'{{ background-color: {field}; }}\n'
+            f'QPushButton {{ background-color: {button}; }}\n'
+            f'QHeaderView::section {{ background-color: {header}; }}\n'
+        )
+    return base + custom

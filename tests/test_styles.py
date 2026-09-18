@@ -13,6 +13,11 @@ class ThemeStyleTests(unittest.TestCase):
         self.assertIn("QProgressBar", theme_qss(True))
         self.assertIn("color: #ffffff", theme_qss(True))
 
+    def test_resource_checkbox_has_balanced_horizontal_spacing(self):
+        selector = 'QTreeWidget#repositoryTree[detailList="true"]::indicator { margin-left: 7px; margin-right: 7px; }'
+        self.assertIn(selector, theme_qss(False))
+        self.assertIn(selector, theme_qss(True))
+
     def test_acrylic_theme_keeps_qt_top_level_opaque(self):
         self.assertNotIn("rgba(243,243,243,218)", theme_qss(False, True))
         self.assertNotIn("rgba(32,33,36,218)", theme_qss(True, True))

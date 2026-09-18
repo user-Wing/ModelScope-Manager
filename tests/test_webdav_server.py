@@ -9,6 +9,7 @@ from pathlib import Path
 
 from modelscope_manager.folder_index import FolderSizeIndex
 from modelscope_manager.service import RemoteEntry, Repository
+from modelscope_manager.webdav_mapping import WebDAVMapping, WebDAVMount, load_webdav_mappings
 from modelscope_manager.webdav_server import ModelScopeWebDAV
 
 
@@ -157,6 +158,63 @@ class WebDAVTests(unittest.TestCase):
             gateway.stop()
         self.assertEqual(response.status, 207)
         self.assertIn(b"public", body)
+
+    def test_custom_mapping_supports_virtual_folders_and_case_insensitive_mount_paths(self):
+        mapping = WebDAVMapping(
+            "TEST",
+            folders=["group"],
+            mounts=[WebDAVMount("group/Demo", "datasets/alice/demo")],
+        )
+        gateway = ModelScopeWebDAV(
+            lambda: self.service,
+            "127.0.0.1",
+            0,
+            "user",
+            "pass",
+            custom_mappings_getter=lambda: [mapping],
+        )
+
+        root = gateway.resolve("/test")
+        group = gateway.resolve("/TEST/GROUP")
+        mounted = gateway.resolve("/test/group/demo")
+
+        self.assertIsNotNone(root)
+        self.assertEqual([node.name for node in gateway.children(root)], ["group"])
+        self.assertIsNotNone(group)
+        self.assertEqual([node.name for node in gateway.children(group)], ["Demo"])
+        self.assertEqual(mounted.repo, Repository("alice/demo", "dataset", "public"))
+        self.assertEqual(mounted.source_path, "datasets/alice/demo")
+
+    def test_custom_mapping_write_translation_is_case_insensitive(self):
+        mapping = WebDAVMapping(
+            "TEST",
+            read_only=False,
+            mounts=[WebDAVMount("group/Demo", "datasets/alice/demo")],
+        )
+        gateway = ModelScopeWebDAV(
+            lambda: self.service,
+            "127.0.0.1",
+            0,
+            "user",
+            "pass",
+            custom_mappings_getter=lambda: [mapping],
+        )
+
+        self.assertEqual(
+            gateway._translate_custom_write("test/GROUP/demo/new.txt"),
+            "datasets/alice/demo/new.txt",
+        )
+
+    def test_mapping_loader_rejects_invalid_targets_and_case_collisions(self):
+        mappings = load_webdav_mappings(
+            '[{"name":"TEST","folders":["Good","good","bad:name"],'
+            '"mounts":[{"target":"GOOD","source":"datasets/alice/demo"},'
+            '{"target":"bad?name","source":"datasets/alice/demo"}]}]'
+        )
+
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0].folders, [])
+        self.assertEqual(mappings[0].mounts, [WebDAVMount("GOOD", "datasets/alice/demo")])
 
     def test_put_routes_to_sdk_upload(self):
         status, _ = self.request("PUT", "/datasets/alice/demo/new.txt", body=b"new")

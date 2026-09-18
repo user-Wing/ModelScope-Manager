@@ -5,8 +5,6 @@ from pathlib import PurePosixPath
 from typing import Iterable
 from urllib.parse import unquote
 
-import requests
-
 from .service import normalize_remote_path
 
 
@@ -14,8 +12,10 @@ MODELSCOPE_ORIGIN = "https://www.modelscope.cn"
 DELETE_BATCH_SIZE = 100
 
 
-def _request(web_session: "ModelScopeWebSession", method: str, url: str, **kwargs) -> requests.Response:
+def _request(web_session: "ModelScopeWebSession", method: str, url: str, **kwargs):
     """Send a web-session request with cookies scoped to ModelScope domains."""
+    import requests
+
     kwargs.pop("cookies", None)
     cookies = requests.cookies.RequestsCookieJar()
     for name, value in web_session.cookies().items():

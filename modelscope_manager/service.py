@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 import threading
-from urllib.parse import unquote, urlparse, urlsplit
-
-import requests
-from requests.auth import AuthBase
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from .http_security import modelscope_token_headers
 from .local_paths import iter_contained_files, validate_upload_source
@@ -37,6 +35,10 @@ def configure_upload_limit_supplier(supplier: Callable[[], int]) -> None:
     """
     global _UPLOAD_LIMITER
     _UPLOAD_LIMITER = SharedRateLimiter(supplier)
+
+
+def _install_sdk_upload_limit() -> None:
+    """Patch the SDK only when the first ModelScope service is constructed."""
     import modelscope_hub._upload as upload_module
 
     stream_class = upload_module._CountedReadStream
@@ -83,6 +85,30 @@ def parse_modelscope_repository_url(value: str) -> "Repository":
     if not owner or not name or owner in {".", ".."} or name in {".", ".."}:
         raise ValueError("链接中缺少账户或仓库名称")
     return Repository(f"{owner}/{name}", repo_type, "public")
+
+
+def parse_modelscope_repository_location(value: str) -> tuple["Repository", str]:
+    """Parse a repository URL and an optional /files subdirectory mount root."""
+    repo = parse_modelscope_repository_url(value)
+    parsed = urlparse(value.strip() if "://" in value else "https://" + value.strip())
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    root = ""
+    if len(parts) > 3:
+        tail = parts[3:]
+        if tail and tail[0].lower() in {"files", "tree", "blob"}:
+            tail = tail[1:]
+        if tail and tail[0].lower() in {"master", "main"}:
+            tail = tail[1:]
+        root = normalize_remote_path(*tail)
+    query = parse_qs(parsed.query)
+    query_path = next((
+        query[key][0]
+        for key in ("path", "Path", "FilePath", "folder", "Folder")
+        if query.get(key)
+    ), "")
+    if query_path:
+        root = normalize_remote_path(unquote(query_path))
+    return repo, root
 
 
 def normalize_remote_path(*parts: str) -> str:
@@ -152,6 +178,22 @@ class RemoteEntry:
     size: int = 0
     sha256: str = ""
     is_dir: bool = False
+    blob_id: str = ""
+    last_modified: str = ""
+    storage: str = ""
+
+
+def _metadata_time_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    raw = str(value)
+    try:
+        stamp = float(raw)
+        if stamp > 10_000_000_000:
+            stamp /= 1000.0
+        return datetime.fromtimestamp(stamp).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError, OSError, OverflowError):
+        return raw
 
 
 def oversized_upload_files(
@@ -177,6 +219,7 @@ class ModelScopeService:
         if require_token and not token:
             raise ValueError("请输入访问令牌")
         from modelscope_hub import HubApi
+        _install_sdk_upload_limit()
 
         self.api = HubApi(token=token)
         self.token = token
@@ -196,6 +239,15 @@ class ModelScopeService:
     def verify(self) -> str:
         self.user = self.api.whoami()
         username = getattr(self.user, "username", None)
+        if not username:
+            payload = self.api.openapi.get_current_user()
+            if isinstance(payload, dict):
+                username = next(
+                    (payload.get(key) for key in ("Username", "username", "name", "preferred_username") if payload.get(key)),
+                    None,
+                )
+            if username:
+                self.user.username = str(username)
         if not username:
             raise RuntimeError("令牌验证成功，但未能取得用户名")
         return str(username)
@@ -248,11 +300,17 @@ class ModelScopeService:
                 entry_type = str(item.get("Type") or item.get("type") or "").lower()
                 size = int(item.get("Size") or item.get("size") or 0)
                 sha256 = str(item.get("Sha256") or item.get("sha256") or "")
+                blob_id = str(item.get("BlobId") or item.get("blob_id") or "")
+                last_modified = _metadata_time_text(item.get("CommittedDate") or item.get("last_modified") or item.get("UpdatedAt"))
+                lfs = item.get("Lfs") or item.get("lfs")
             else:
                 path = getattr(item, "path", None)
                 entry_type = str(getattr(item, "type", "") or "").lower()
                 size = int(getattr(item, "size", 0) or 0)
                 sha256 = str(getattr(item, "sha256", "") or "")
+                blob_id = str(getattr(item, "blob_id", "") or "")
+                last_modified = _metadata_time_text(getattr(item, "last_modified", ""))
+                lfs = getattr(item, "lfs", None)
             if path:
                 normalized = str(path).replace("\\", "/").strip("/")
                 entries[normalized] = RemoteEntry(
@@ -260,6 +318,9 @@ class ModelScopeService:
                     size=size,
                     sha256=sha256,
                     is_dir=entry_type in {"tree", "directory", "dir", "folder"},
+                    blob_id=blob_id,
+                    last_modified=last_modified,
+                    storage="LFS" if lfs else ("Directory" if entry_type in {"tree", "directory", "dir", "folder"} else "Git"),
                 )
         return sorted(entries.values(), key=lambda entry: entry.path)
 
@@ -275,6 +336,8 @@ class ModelScopeService:
         )
 
     def download_to_file(self, repo: Repository, remote_path: str, target: Path) -> None:
+        import requests
+
         url = self.get_download_url(repo, remote_path)
         headers = modelscope_token_headers(url, self.token)
         with requests.get(url, headers=headers, stream=True, timeout=30) as response:
@@ -345,6 +408,10 @@ class ModelScopeService:
             disable_tqdm=True,
         )
 
+    def get_download_headers(self, repo: Repository, download_url: str) -> dict[str, str]:
+        """Return credentials scoped to the ModelScope URL used for resolution."""
+        return modelscope_token_headers(download_url, self.token, include_session_cookie=True)
+
     def upload_folder(
         self,
         repo: Repository,
@@ -372,7 +439,7 @@ class ModelScopeService:
             )
 
 
-class _ModelScopeCsrfAuth(AuthBase):
+class _ModelScopeCsrfAuth:
     def __init__(self, csrf_token: str):
         self.csrf_token = unquote(csrf_token)
 
@@ -400,6 +467,8 @@ class ModelScopeWebService(ModelScopeService):
             client._session.auth = _ModelScopeCsrfAuth(web_session.csrf_token)
 
     def download_to_file(self, repo: Repository, remote_path: str, target: Path) -> None:
+        import requests
+
         session = requests.Session()
         for name, value in self.web_session.cookies().items():
             session.cookies.set(name, value, domain=".modelscope.cn", path="/")
@@ -410,6 +479,17 @@ class ModelScopeWebService(ModelScopeService):
                 for chunk in response.iter_content(1024 * 1024):
                     if chunk:
                         output.write(chunk)
+
+    def get_download_headers(self, repo: Repository, download_url: str) -> dict[str, str]:
+        host = (urlsplit(download_url).hostname or "").lower().rstrip(".")
+        if host != "modelscope.cn" and not host.endswith(".modelscope.cn"):
+            return {}
+        cookies = self.web_session.cookies()
+        headers = {"Cookie": "; ".join(f"{name}={value}" for name, value in cookies.items())}
+        if self.web_session.csrf_token:
+            headers["X-CSRF-TOKEN"] = unquote(self.web_session.csrf_token)
+            headers["Origin"] = "https://www.modelscope.cn"
+        return headers
 
     def upload_file_as(self, repo: Repository, local_path: Path, remote_path: str) -> Any:
         raise RuntimeError("网页登录账户不用于上传，请添加可访问该仓库的 Token 账户")
@@ -458,10 +538,14 @@ class MultiAccountService:
 
     def _for(self, repo: Repository, *, for_write: bool = False) -> ModelScopeService:
         services = self._routes.get((repo.repo_type, repo.repo_id), [])
-        if for_write:
-            # Web-login services deliberately reject uploads. Prefer an actual
-            # Token SDK service when the same repository appears under both.
-            services = [service for service in services if str(getattr(service, "token", "") or "")]
+        token_services = [
+            service for service in services
+            if str(getattr(service, "token", "") or "")
+        ]
+        if token_services:
+            services = token_services
+        elif for_write:
+            services = []
         if not services:
             action = "write" if for_write else "access"
             raise RuntimeError(f"No verified account can {action} {repo.repo_id}")
@@ -472,6 +556,9 @@ class MultiAccountService:
 
     def get_download_url(self, repo: Repository, remote_path: str) -> str:
         return self._for(repo).get_download_url(repo, remote_path)
+
+    def get_download_headers(self, repo: Repository, download_url: str) -> dict[str, str]:
+        return self._for(repo).get_download_headers(repo, download_url)
 
     def upload_file_as(self, repo: Repository, local_path: Path, remote_path: str) -> Any:
         return self._for(repo, for_write=True).upload_file_as(repo, local_path, remote_path)

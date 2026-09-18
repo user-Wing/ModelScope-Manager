@@ -13,7 +13,7 @@ from .app_workers import CopyThread, DeleteThread, RelocateThread, TaskThread, U
 from .database import AccountRecord, IndexedEntry, classify_file, everything_search_match
 from .image_bed import IMAGE_EXTENSIONS
 from .fluent_ui import CleanComboBox
-from .service import ModelScopeService, ModelScopeWebService, RemoteEntry, Repository, normalize_remote_path, parse_modelscope_repository_url, repository_directories
+from .service import ModelScopeService, ModelScopeWebService, RemoteEntry, Repository, normalize_remote_path, parse_modelscope_repository_location, parse_modelscope_repository_url, repository_directories
 from .web_session import ModelScopeWebSession, delete_repository_file
 
 
@@ -436,7 +436,7 @@ class RepositorySearchMixin:
             return
         try:
             search_url = self.search_url_edit.currentText().strip()
-            repo = parse_modelscope_repository_url(search_url)
+            repo, root_path = parse_modelscope_repository_location(search_url)
         except ValueError as exc:
             QMessageBox.warning(self, self._t("链接无效"), str(exc))
             return
@@ -445,7 +445,10 @@ class RepositorySearchMixin:
 
         def action():
             service = ModelScopeService("", require_token=False)
-            return service, repo, service.list_entries(repo), search_url
+            entries = service.list_entries(repo)
+            if root_path:
+                entries = [entry for entry in entries if entry.path == root_path or entry.path.startswith(root_path + "/")]
+            return service, repo, entries, search_url, root_path
 
         worker = TaskThread(action, self)
         worker.succeeded.connect(self._public_resource_loaded)
@@ -455,13 +458,16 @@ class RepositorySearchMixin:
         self.task = worker
         worker.start()
 
-    def _public_resource_loaded(self, result: tuple[ModelScopeService, Repository, list[RemoteEntry], str]) -> None:
-        self.search_service, self.search_repo, self.search_entries, search_url = result
-        self.public_pool_store.add(search_url, self.search_repo)
+    def _public_resource_loaded(self, result: tuple[ModelScopeService, Repository, list[RemoteEntry], str, str]) -> None:
+        self.search_service, self.search_repo, self.search_entries, search_url, self.search_root_path = result
+        self.public_pool_store.add(search_url, self.search_repo, self.search_root_path)
         if self.webdav:
             self.webdav.refresh_public_pools()
-        self.account_store.cache_entries(PUBLIC_ACCOUNT_ID, self.search_repo, self.search_entries)
-        self.folder_index.update_repository(self.search_repo, self.search_entries, True)
+        if self.search_root_path:
+            self.folder_index.update_folder(self.search_repo, self.search_root_path, self.search_entries, True)
+        else:
+            self.account_store.cache_entries(PUBLIC_ACCOUNT_ID, self.search_repo, self.search_entries)
+            self.folder_index.update_repository(self.search_repo, self.search_entries, True)
         self._render_public_history()
         self._render_repositories()
         self._refresh_tag_filter()

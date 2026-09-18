@@ -216,6 +216,17 @@ def initialize_database(path: Path, legacy_folder_index: Path | None = None) -> 
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS image_records_created ON image_records(created_at DESC);
+            CREATE TABLE IF NOT EXISTS transfer_history (
+                transfer_id TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                source TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS transfer_history_completed ON transfer_history(completed_at DESC);
             CREATE TABLE IF NOT EXISTS tags (
                 name TEXT PRIMARY KEY COLLATE NOCASE,
                 created_at INTEGER NOT NULL

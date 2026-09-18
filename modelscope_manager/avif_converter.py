@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .storage import APP_DIR
+from .storage import FFMPEG_DIR
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class AvifOptions:
 
 
 def find_ffmpeg() -> Path | None:
-    bundled = APP_DIR / "embedded-tools" / "ffmpeg" / "ffmpeg.exe"
+    bundled = FFMPEG_DIR / "ffmpeg.exe"
     if bundled.is_file():
         return bundled
     executable = shutil.which("ffmpeg")

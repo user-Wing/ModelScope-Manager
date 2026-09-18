@@ -28,8 +28,9 @@ from .http_security import modelscope_token_headers, safe_urlopen
 from .image_bed import IMAGE_EXTENSIONS, ImageStore
 from .local_paths import iter_contained_files
 from .player_installer import install_potplayer
+from .plugin_installer import install_ffmpeg
 from .service import ModelScopeService, RemoteEntry, Repository, normalize_remote_path
-from .storage import POTPLAYER_DIR, SEVEN_ZIP_ZSTD_EXE, THUMBNAIL_CACHE_DIR
+from .storage import FFMPEG_DIR, POTPLAYER_DIR, SEVEN_ZIP_ZSTD_EXE, THUMBNAIL_CACHE_DIR
 from .web_session import DELETE_BATCH_SIZE, delete_repository_file, delete_repository_files, list_repository_file_paths
 
 
@@ -59,6 +60,16 @@ class ThumbnailThread(QThread):
         super().__init__(parent)
         self.service, self.repo, self.entries, self.maximum_size = service, repo, entries, maximum_size
         self.workers = max(1, workers)
+        self._processes: set[subprocess.Popen] = set()
+        self._process_lock = threading.Lock()
+
+    def requestInterruption(self) -> None:
+        super().requestInterruption()
+        with self._process_lock:
+            processes = list(self._processes)
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
 
     def run(self) -> None:
         THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,8 +87,9 @@ class ThumbnailThread(QThread):
                     path, thumbnail = result
                     completed[path] = thumbnail
         finally:
-            executor.shutdown(wait=not self.isInterruptionRequested(), cancel_futures=True)
-        self.ready.emit(completed)
+            executor.shutdown(wait=True, cancel_futures=True)
+        if not self.isInterruptionRequested():
+            self.ready.emit(completed)
 
     @staticmethod
     def is_eligible(entry: RemoteEntry, maximum_size: int) -> bool:
@@ -101,13 +113,35 @@ class ThumbnailThread(QThread):
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
                 if Path(entry.path).suffix.lower() in IMAGE_EXTENSIONS:
                     headers = modelscope_token_headers(url, self.service.token, include_session_cookie=True)
+                    chunks = []
                     with safe_urlopen(Request(url, headers=headers), timeout=20) as response:
-                        image_bytes = response.read()
-                    subprocess.run(command + ["-f", "image2pipe", "-i", "pipe:0", "-frames:v", "1", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "-q:v", "3", str(target)], input=image_bytes, capture_output=True, timeout=45, check=True, creationflags=creationflags)
+                        while not self.isInterruptionRequested():
+                            chunk = response.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                    if self.isInterruptionRequested():
+                        return None
+                    process = subprocess.Popen(command + ["-f", "image2pipe", "-i", "pipe:0", "-frames:v", "1", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "-q:v", "3", str(target)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creationflags)
+                    with self._process_lock:
+                        self._processes.add(process)
+                    process.communicate(b"".join(chunks), timeout=45)
+                    if process.returncode:
+                        raise subprocess.CalledProcessError(process.returncode, process.args)
                 else:
-                    subprocess.run(command + ["-ss", str(VIDEO_THUMBNAIL_SEEK_SECONDS), "-probesize", "32k", "-analyzeduration", "0", "-i", url, "-map", "0:v:0", "-frames:v", "1", "-an", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "-q:v", "3", str(target)], capture_output=True, timeout=45, check=True, creationflags=creationflags)
+                    process = subprocess.Popen(command + ["-ss", str(VIDEO_THUMBNAIL_SEEK_SECONDS), "-probesize", "32k", "-analyzeduration", "0", "-i", url, "-map", "0:v:0", "-frames:v", "1", "-an", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "-q:v", "3", str(target)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creationflags)
+                    with self._process_lock:
+                        self._processes.add(process)
+                    process.communicate(timeout=45)
+                    if process.returncode:
+                        raise subprocess.CalledProcessError(process.returncode, process.args)
+                with self._process_lock:
+                    self._processes.discard(process)
             return (entry.path, str(target)) if target.exists() else None
         except Exception:
+            if 'process' in locals():
+                with self._process_lock:
+                    self._processes.discard(process)
             return None
 
 class CopyThread(QThread):
@@ -483,8 +517,11 @@ class UploadThread(QThread):
         self.item_done.emit(str(path), True, message)
 
 class DownloadThread(QThread):
-    progress_info = Signal(int, int, float, int)
-    item_update = Signal(str, str, int, int, str)
+    # PySide's Signal(int) is a signed 32-bit C integer on Windows.  Byte
+    # counters routinely exceed that for model files, so keep them as Python
+    # integers across the worker/UI thread boundary.
+    progress_info = Signal(object, object, float, int)
+    item_update = Signal(str, str, object, object, str)
     completed = Signal(int, int)
     failed = Signal(str)
 
@@ -525,9 +562,28 @@ class PotPlayerInstallThread(QThread):
         else:
             self.completed.emit(str(executable))
 
+class FFmpegInstallThread(QThread):
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, archive: Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.archive = archive
+
+    def run(self) -> None:
+        try:
+            executable = install_ffmpeg(
+                self.archive, SEVEN_ZIP_ZSTD_EXE, FFMPEG_DIR,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        else:
+            self.completed.emit(str(executable))
+
+
 class BackupThread(QThread):
     item_done = Signal(str, bool, str)
-    progress_info = Signal(int, int, float, int)
+    progress_info = Signal(object, object, float, int)
     completed = Signal(str, int, int, int)
 
     def __init__(

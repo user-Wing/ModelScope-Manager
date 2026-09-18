@@ -3,12 +3,69 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPalette, QPen, QPolygonF
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QListWidget, QMenu, QPushButton, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from datetime import datetime
 from .app_helpers import breadcrumb_levels
 from .service import RemoteEntry
 from .transfer_statistics import TransferSample
+
+
+class SkinBackgroundLayer(QWidget):
+    """Cached, cover-scaled window wallpaper with a cheap live dimmer."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._path = ""
+        self._source = QPixmap()
+        self._scaled = QPixmap()
+        self._scaled_size = self.size()
+        self._brightness = 100
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.hide()
+
+    def set_background(self, path: str, brightness: int = 100) -> None:
+        normalized = str(path or "")
+        if normalized != self._path:
+            self._path = normalized
+            self._source = QPixmap(normalized) if normalized else QPixmap()
+            self._scaled = QPixmap()
+        self._brightness = min(180, max(20, int(brightness)))
+        self.setVisible(not self._source.isNull())
+        self.lower()
+        self.update()
+
+    def set_brightness(self, brightness: int) -> None:
+        value = min(180, max(20, int(brightness)))
+        if value == self._brightness:
+            return
+        self._brightness = value
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        self._scaled = QPixmap()
+        self._scaled_size = event.size()
+        super().resizeEvent(event)
+
+    def paintEvent(self, event) -> None:
+        if self._source.isNull():
+            return
+        if self._scaled.isNull() or self._scaled_size != self.size():
+            self._scaled_size = self.size()
+            self._scaled = self._source.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        painter = QPainter(self)
+        x = (self.width() - self._scaled.width()) // 2
+        y = (self.height() - self._scaled.height()) // 2
+        painter.drawPixmap(x, y, self._scaled)
+        # Brightness 100 intentionally retains a readable Codex-like dim layer.
+        dim_alpha = round((180 - self._brightness) * 210 / 160)
+        if dim_alpha > 0:
+            painter.fillRect(self.rect(), QColor(8, 9, 12, min(210, dim_alpha)))
 
 
 class TransferChart(QWidget):

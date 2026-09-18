@@ -10,12 +10,13 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDoubleSpinBox, QFileDialog, QInputDialog, QLabel, QMessageBox, QTableWidgetItem, QTimeEdit
 from pathlib import Path
 from .app_helpers import PUBLIC_ACCOUNT_ID, find_available_port, format_speed
-from .app_workers import FolderIndexThread, PotPlayerInstallThread
+from .app_workers import FFmpegInstallThread, FolderIndexThread, PotPlayerInstallThread
 from .download_service import Aria2Tuning, DownloadSpec
 from .player_installer import POTPLAYER_ARCHIVE_SHA256, POTPLAYER_ARCHIVE_SIZE, POTPLAYER_REMOTE_PATH, POTPLAYER_REPOSITORY, find_potplayer
+from .plugin_installer import FFMPEG_ARCHIVE_SHA256, FFMPEG_ARCHIVE_SIZE, FFMPEG_REMOTE_PATH, FFMPEG_REPOSITORY, find_installed_ffmpeg
 from .security import store_secret
 from .service import ModelScopeService, MultiAccountService, RemoteEntry, Repository, configure_upload_limit_supplier
-from .storage import PLAYER_DOWNLOAD_DIR, POTPLAYER_DIR
+from .storage import FFMPEG_DIR, PLAYER_DOWNLOAD_DIR, PLUGIN_DOWNLOAD_DIR, POTPLAYER_DIR
 from .transfer_policy import SpeedRule, TransferPolicy
 from .webdav_server import ModelScopeWebDAV
 
@@ -236,7 +237,7 @@ class IntegrationsMixin:
             "PotPlayer：已安装" if available else "PotPlayer：尚未安装"
         ))
         self.potplayer_install_button.setText(self._t(
-            "重新安装 PotPlayer" if available else "下载并安装 PotPlayer"
+            "重新安装" if available else "下载并安装"
         ))
         self.potplayer_folder_button.setEnabled(available)
 
@@ -336,6 +337,85 @@ class IntegrationsMixin:
         if executable:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(executable.parent)))
 
+    @staticmethod
+    def _ffmpeg_available() -> bool:
+        return find_installed_ffmpeg(FFMPEG_DIR) is not None
+
+    def _refresh_ffmpeg_status(self) -> None:
+        if not hasattr(self, "ffmpeg_status"):
+            return
+        available = self._ffmpeg_available()
+        self.ffmpeg_status.setText(self._t(
+            "FFmpeg：已安装" if available else "FFmpeg：尚未安装"
+        ))
+        self.ffmpeg_install_button.setText(self._t(
+            "重新安装" if available else "下载并安装"
+        ))
+        self.ffmpeg_folder_button.setEnabled(available)
+
+    def install_ffmpeg_from_modelscope(self) -> None:
+        if self.ffmpeg_install_thread and self.ffmpeg_install_thread.isRunning():
+            QMessageBox.information(self, self._t("正在安装 FFmpeg"), self._t("请等待当前解压安装完成。"))
+            return
+        if self.task and self.task.isRunning():
+            QMessageBox.information(
+                self, self._t("传输正在进行"),
+                self._t("FFmpeg 将加入下载队列，并在当前下载完成后自动开始。"),
+            )
+        PLUGIN_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        archive = PLUGIN_DOWNLOAD_DIR / "FFmpeg.7z"
+        service = ModelScopeService("", require_token=False)
+        repo = Repository(FFMPEG_REPOSITORY, "dataset", "public")
+        spec = DownloadSpec(
+            FFMPEG_REMOTE_PATH,
+            archive,
+            service.get_download_url(repo, FFMPEG_REMOTE_PATH),
+            FFMPEG_ARCHIVE_SIZE,
+            FFMPEG_ARCHIVE_SHA256,
+        )
+        self.ffmpeg_install_archive = archive
+        self.settings.setValue("plugin/ffmpeg_install_pending", True)
+        self.ffmpeg_status.setText(self._t("FFmpeg：等待下载"))
+        self._enqueue_download_specs([spec])
+
+    def _start_ffmpeg_extraction(self, archive: Path) -> None:
+        if self.ffmpeg_install_thread and self.ffmpeg_install_thread.isRunning():
+            return
+        self.ffmpeg_status.setText(self._t("FFmpeg：正在校验并解压"))
+        self.ffmpeg_install_button.setEnabled(False)
+        worker = FFmpegInstallThread(archive, self)
+        worker.completed.connect(self._ffmpeg_installed)
+        worker.failed.connect(self._ffmpeg_install_failed)
+        worker.finished.connect(self._ffmpeg_install_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.ffmpeg_install_thread = worker
+        worker.start()
+
+    def _ffmpeg_installed(self, executable: str) -> None:
+        self.settings.remove("plugin/ffmpeg_install_pending")
+        self.ffmpeg_install_archive = None
+        self.ffmpeg_status.setText(self._t("FFmpeg：已安装"))
+        self._log(f"FFmpeg 安装完成：{executable}")
+        QMessageBox.information(
+            self, self._t("FFmpeg 安装完成"),
+            self._t("FFmpeg 已安装，图床 AVIF 自动转换现在会优先使用此版本。"),
+        )
+
+    def _ffmpeg_install_failed(self, error: str) -> None:
+        self.ffmpeg_status.setText(self._t("FFmpeg：安装失败"))
+        self._log(f"FFmpeg 安装失败：{error}")
+        QMessageBox.warning(self, self._t("FFmpeg 安装失败"), error)
+
+    def _ffmpeg_install_finished(self) -> None:
+        self.ffmpeg_install_thread = None
+        self.ffmpeg_install_button.setEnabled(True)
+        self._refresh_ffmpeg_status()
+
+    def open_ffmpeg_folder(self) -> None:
+        executable = find_installed_ffmpeg(FFMPEG_DIR)
+        if executable:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(executable.parent)))
+
     def add_external_player(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self, "选择 mpv、PotPlayer 或其他播放器", "", "播放器程序 (*.exe);;所有文件 (*)"
@@ -375,6 +455,11 @@ class IntegrationsMixin:
         self.alist_url_label.setText(self._tf(
             "WebDAV 地址：{url}", url=f"http://{shown_host}:{self.alist_port.value()}/dav/"
         ))
+        if hasattr(self, "webdav_mapping_combo"):
+            self._update_webdav_mapping_preview()
+            self._render_webdav_mapping_overview()
+        if hasattr(self, "webdav_drive_table"):
+            self._refresh_webdav_drive_statuses()
 
     def _save_alist_settings(self) -> None:
         if self._restoring_settings:
@@ -420,8 +505,9 @@ class IntegrationsMixin:
                 selected_port,
                 username,
                 password,
-                self.public_pool_store.repositories,
+                self.public_pool_store.mounts,
                 self.folder_index,
+                lambda: list(self.webdav_mappings),
             )
             self.webdav.start()
             with socket.create_connection(("127.0.0.1", selected_port), timeout=2):

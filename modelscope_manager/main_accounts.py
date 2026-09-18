@@ -54,12 +54,13 @@ class AccountsMixin:
         for item in self.public_pool_store.load():
             row = table.rowCount()
             table.insertRow(row)
-            table.setItem(row, 0, QTableWidgetItem(item["repo_id"]))
+            root = item.get("root_path", "")
+            table.setItem(row, 0, QTableWidgetItem(item["repo_id"] + (f" / {root}" if root else "")))
             table.setItem(row, 1, QTableWidgetItem(item["repo_type"]))
             table.setItem(row, 2, QTableWidgetItem(item.get("url", "")))
             remove = QPushButton("删除")
             repo = Repository(item["repo_id"], item["repo_type"], "public")
-            remove.clicked.connect(lambda checked=False, value=repo: self._remove_public_repository(value))
+            remove.clicked.connect(lambda checked=False, value=repo, mount_root=root: self._remove_public_repository(value, mount_root))
             table.setCellWidget(row, 3, remove)
 
     def _refresh_search_history_window(self) -> None:
@@ -68,10 +69,11 @@ class AccountsMixin:
             if table:
                 self._populate_search_history_table(table)
 
-    def _remove_public_repository(self, repo: Repository) -> None:
-        self.public_pool_store.remove(repo)
-        self.account_store.remove_repository_entries(PUBLIC_ACCOUNT_ID, repo.repo_type, repo.repo_id)
-        self.folder_index.remove_repository(repo, True)
+    def _remove_public_repository(self, repo: Repository, root_path: str | None = None) -> None:
+        self.public_pool_store.remove(repo, root_path)
+        if not any(mount.repo == repo for mount in self.public_pool_store.mounts()):
+            self.account_store.remove_repository_entries(PUBLIC_ACCOUNT_ID, repo.repo_type, repo.repo_id)
+            self.folder_index.remove_repository(repo, True)
         if self.webdav:
             self.webdav.refresh_public_pools()
         if self.selected_repo_public and self.selected_repo == repo:

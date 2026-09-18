@@ -20,8 +20,10 @@ DEVICE_ID_PATH = CONFIG_DIR / "device.id"
 IMAGE_CACHE_DIR = CONFIG_DIR / "image_cache"
 THUMBNAIL_CACHE_DIR = CONFIG_DIR / "thumbnails"
 PLAYER_DOWNLOAD_DIR = CONFIG_DIR / "player_download"
+PLUGIN_DOWNLOAD_DIR = CONFIG_DIR / "plugin_download"
 POTPLAYER_DIR = CONFIG_DIR / "players" / "potplayer"
 EMBEDDED_TOOLS_DIR = APP_DIR / "embedded-tools"
+FFMPEG_DIR = EMBEDDED_TOOLS_DIR / "ffmpeg"
 SEVEN_ZIP_ZSTD_EXE = EMBEDDED_TOOLS_DIR / "7zip-zstd" / "7z.exe"
 
 

@@ -31,7 +31,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
-    QIcon, QImageReader, QKeySequence, QPainter, QPalette, QPen, QPolygonF,
+    QIcon, QKeySequence, QPainter, QPalette, QPen, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,7 +60,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QScrollArea,
     QStyle,
-    QStatusBar,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -121,11 +120,12 @@ from .service import (
     Repository,
     normalize_remote_path,
     oversized_upload_files,
+    parse_modelscope_repository_location,
     parse_modelscope_repository_url,
     repository_directories,
-    configure_upload_limit_supplier,
 )
 from .styles import theme_qss
+from .skin_theme import SkinImage, ensure_skin_library, save_skin_config
 from .storage import (
     APP_DIR,
     DEVICE_ID_PATH,
@@ -134,6 +134,8 @@ from .storage import (
     THUMBNAIL_CACHE_DIR,
     MANAGER_DB_PATH,
     PLAYER_DOWNLOAD_DIR,
+    PLUGIN_DOWNLOAD_DIR,
+    FFMPEG_DIR,
     POTPLAYER_DIR,
     PUBLIC_POOLS_PATH,
     SEVEN_ZIP_ZSTD_EXE,
@@ -145,7 +147,9 @@ from .storage import (
 from .startup import set_windows_startup, windows_startup_enabled
 from .transfer_policy import SpeedRule, TransferPolicy
 from .transfer_statistics import TransferSample, TransferStatistics, UploadHealthMonitor
+from .transfer_history import TransferHistoryStore
 from .webdav_server import ModelScopeWebDAV
+from .webdav_mapping import load_webdav_mappings
 from .web_session import (
     DELETE_BATCH_SIZE, ModelScopeWebSession, delete_repository_file, delete_repository_files,
     fetch_web_user_info, list_repository_file_paths, web_session_username,
@@ -159,9 +163,9 @@ from .app_helpers import (
     repository_identity, repository_is_public, restore_combo_setting, running_download_percent,
     thumbnail_batch_policy,
 )
-from .app_widgets import DropArea, PathBreadcrumb, RepositoryList, RepositoryTree, TransferChart
+from .app_widgets import DropArea, PathBreadcrumb, RepositoryList, RepositoryTree, SkinBackgroundLayer, TransferChart
 from .app_workers import (
-    BackupThread, CopyThread, DeleteThread, DownloadThread, FolderIndexThread, ImageUploadThread,
+    BackupThread, CopyThread, DeleteThread, DownloadThread, FFmpegInstallThread, FolderIndexThread, ImageUploadThread,
     PotPlayerInstallThread, RelocateThread, TaskThread, ThumbnailThread, UploadCancelled,
     UploadQueueItem, UploadThread,
 )
@@ -172,10 +176,41 @@ class MainWindow(MainWindowMixin, FluentWindow):
     def __init__(self):
         self._event_filter_ready = False
         super().__init__()
-        self.setWindowTitle(f"ModelScope Manager {__version__}")
+        self.setWindowTitle("ModelScope Manager")
         self.resize(1180, 760)
         self.setMinimumSize(980, 650)
+        self.skin_background_layer = SkinBackgroundLayer(self)
+        self.skin_background_layer.setGeometry(self.rect())
+        self.skin_background_layer.lower()
         self.settings = portable_settings()
+        self._current_font_point_size = max(1, int(self.settings.value("font_size", 10)))
+        self.skin_directory, self.skin_config = ensure_skin_library(
+            str(self.settings.value("skin/active_folder", ""))
+        )
+        self.skin_config_path = self.skin_directory / "skin.ini"
+        self.settings.setValue("skin/active_folder", self.skin_directory.name)
+        if (
+            not self.settings.value("skin/library_initialized", False, type=bool)
+            and not self.skin_config.images
+        ):
+            legacy_mode = str(self.settings.value("theme", "system"))
+            self.skin_config.color_mode = legacy_mode if legacy_mode in {"light", "dark", "system"} else "dark"
+            legacy_color = str(self.settings.value("skin/theme_color", "#0078D4"))
+            self.skin_config.color = legacy_color if QColor(legacy_color).isValid() else "auto"
+            legacy_background = Path(str(self.settings.value("skin/background", "")))
+            if legacy_background.is_file():
+                self.skin_directory.mkdir(parents=True, exist_ok=True)
+                target = self.skin_directory / legacy_background.name
+                if legacy_background.resolve() != target.resolve():
+                    shutil.copy2(legacy_background, target)
+                brightness = min(180, max(20, int(self.settings.value("skin/brightness", 100))))
+                self.skin_config.images.append(SkinImage(target.name, {page: brightness for page in range(7)}))
+                self.skin_config.auto_color_image = target.name
+            save_skin_config(self.skin_config_path, self.skin_config)
+        self.settings.setValue("skin/library_initialized", True)
+        for legacy_key in ("theme", "skin/theme_color", "skin/background", "skin/brightness"):
+            self.settings.remove(legacy_key)
+        self._skin_random_assignments: dict[int, str] = {}
         self.plaintext_credentials_enabled = str(
             self.settings.value("experiments/plaintext_credentials", "false")
         ).lower() == "true"
@@ -268,6 +303,8 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.media_proxy = AuthenticatedMediaProxy()
         self.potplayer_install_archive: Path | None = None
         self.potplayer_install_thread: PotPlayerInstallThread | None = None
+        self.ffmpeg_install_archive: Path | None = None
+        self.ffmpeg_install_thread: FFmpegInstallThread | None = None
         self.update_check_thread: QThread | None = None
         self.update_prepare_thread: QThread | None = None
         self.update_check_manual = False
@@ -276,24 +313,40 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.search_service: ModelScopeService | None = None
         self.search_repo: Repository | None = None
         self.search_entries: list[RemoteEntry] = []
+        self.search_root_path = ""
         self.external_players: list[dict[str, str]] = []
         self._image_repository_selections: dict[str, tuple[str, str]] = {}
         self.search_history_window: QWidget | None = None
         self.transfer_policy = TransferPolicy()
         self.webdav: ModelScopeWebDAV | None = None
+        self.webdav_mappings = load_webdav_mappings(
+            str(self.settings.value("webdav/custom_mappings", "[]"))
+        )
         self.index_task: FolderIndexThread | None = None
         self._index_refresh_pending = False
         self.index_inflight_keys: set[tuple[str, str, str, bool]] = set()
         self.dirty_repositories: set[tuple[str, str, str, bool]] = set()
         self.current_upload_speed = 0.0
         self.current_download_speed = 0.0
+        self.session_upload_bytes = 0
+        self.session_download_bytes = 0
+        self.lifetime_upload_bytes = int(self.settings.value("statistics/lifetime_upload_bytes", 0))
+        self.lifetime_download_bytes = int(self.settings.value("statistics/lifetime_download_bytes", 0))
+        self._last_resource_sample = None
         self.session_started_at = time.time()
         self.transfer_statistics = TransferStatistics(self.session_started_at)
+        self.transfer_history_store = TransferHistoryStore(MANAGER_DB_PATH)
+        self._transfer_started: dict[str, float] = {}
+        self._history_recorded: set[str] = set()
         self.upload_health_monitor = UploadHealthMonitor()
-        self.resource_monitor = ProcessResourceMonitor()
+        # GPU/PDH discovery can take about half a second on Windows. Create it
+        # on the first scheduled sample, after the main window is visible.
+        self.resource_monitor: ProcessResourceMonitor | None = None
         self._last_memory_trim = 0.0
         self._download_stat_last_completed = 0
+        self._download_stat_initialized = False
         self._force_close = False
+        self._shutting_down = False
         self._restoring_settings = False
         self.task: QThread | None = None
         self.resource_search_timer = QTimer(self)
@@ -325,6 +378,10 @@ class MainWindow(MainWindowMixin, FluentWindow):
         self.auto_update_timer.setSingleShot(True)
         self.auto_update_timer.setInterval(2500)
         self.auto_update_timer.timeout.connect(self.start_auto_update_check)
+        # run() installs the final application QSS before these widgets are
+        # created. Remember it so _apply_theme() does not repolish the entire
+        # window during settings restoration.
+        self._last_app_qss = QApplication.instance().styleSheet()
         self._build_ui()
         hints = QApplication.instance().styleHints()
         if hasattr(hints, "colorSchemeChanged"):
@@ -339,11 +396,13 @@ class MainWindow(MainWindowMixin, FluentWindow):
         if any(account.token for account in self.accounts) or any(
             self.account_store.load_web_session(account.account_id) for account in self.web_accounts
         ):
-            QTimer.singleShot(0, self.load_repositories)
+            # Let the first frame reach the compositor before SDK/service work
+            # begins. The network work itself continues on TaskThread.
+            QTimer.singleShot(160, self.load_repositories)
         else:
             if self.alist_auto_start.isChecked():
-                QTimer.singleShot(0, self.apply_alist_settings)
-            QTimer.singleShot(0, lambda: self._start_folder_indexing(True))
+                QTimer.singleShot(160, self.apply_alist_settings)
+            QTimer.singleShot(220, lambda: self._start_folder_indexing(True))
         self.backup_timer.start()
         self.transfer_policy_timer.start()
         self.transfer_statistics_timer.start()
@@ -368,9 +427,43 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("ModelScope Manager")
     app.setOrganizationName("ARXChem")
-    initial_font = QFont("Microsoft YaHei UI")
+    launch_font_families = (
+        str(launch_settings.value("font/western", "Segoe UI")),
+        str(launch_settings.value("font/chinese", "Microsoft YaHei UI")),
+    )
+    initial_font = QFont()
+    initial_font.setFamilies(list(launch_font_families))
     initial_font.setPointSize(int(launch_settings.value("font_size", 10)))
     app.setFont(initial_font)
+    launch_skin_directory, launch_skin = ensure_skin_library(
+        str(launch_settings.value("skin/active_folder", ""))
+    )
+    launch_settings.setValue("skin/active_folder", launch_skin_directory.name)
+    launch_dark = (
+        QApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+        if launch_skin.color_mode == "system"
+        else launch_skin.color_mode == "dark"
+    )
+    # Set Fluent's global theme before creating hundreds of widgets. Doing it
+    # afterwards forces every control to rebuild its style sheet and dominated
+    # the former 5–10 second startup delay.
+    setTheme(Theme.DARK if launch_dark else Theme.LIGHT)
+    launch_accent = QColor(launch_skin.color)
+    if launch_skin.color.lower() == "auto" and launch_skin.images:
+        names = [item.filename for item in launch_skin.images]
+        name = launch_skin.auto_color_image if launch_skin.auto_color_image in names else names[0]
+        launch_accent = MainWindow._dominant_skin_color(launch_skin_directory / name)
+    if not launch_accent.isValid():
+        launch_accent = QColor("#0078D4")
+    setThemeColor(launch_accent.name())
+    launch_acrylic = str(launch_settings.value("graphics/acrylic", "true")).lower() == "true"
+    app.setStyleSheet(theme_qss(
+        launch_dark,
+        launch_acrylic,
+        launch_font_families,
+        launch_accent.name(),
+        "skin" if launch_skin.images else "",
+    ))
     window = MainWindow()
     window.show()
     return app.exec()

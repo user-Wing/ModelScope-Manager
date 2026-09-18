@@ -24,6 +24,7 @@
 | 资源监控/回收 | ctypes 调 Windows 进程 API + PDH GPU 计数器；后台空闲时 trim working set | 不引入 psutil/GPU 厂商 SDK；不在传输中回收，不宣称降低 private bytes |
 | ModelScope 访问 | 官方 `modelscope-hub` SDK | 官方维护分页/上传；不自写 HTTP 协议 |
 | 下载引擎 | 内置 aria2-next（RPC） | 多线程 + 断点续传 + 限速；SDK 自带下载单线程 |
+| 同名下载恢复 | UI 记录覆盖策略；Runner 先做大小/SHA-256 预检，再决定复用、aria2 续传或重下 | 不把“同名”直接当“相同”，也不无条件浪费带宽覆盖 |
 | 删除/移动/重命名 | 独立网页登录会话执行 | **平台限制：Token API 不允许删除**；批量删除 100 文件/次提交，失败回退逐项 |
 | 上传 | 一律走有权 Token 的 SDK | 网页上传接口受限；文件夹上传、备份、图床共用 |
 | 播放私有资源 | 仅监听 127.0.0.1 的内存流转发鉴权 | Token 不进播放器命令行，无媒体缓存 |
@@ -33,13 +34,15 @@
 | 索引策略 | 启动全量一次；之后空闲/变更才刷新 | 避免普通翻页反复遍历仓库；后台间隔可配置 |
 | 大文件上传 | 不设 50 GB 软件拦截，默认交给 SDK 上传 | 已用 51 GiB LFS 初始化请求确认服务端接受；内置 SDK 上限为 100 GB |
 | 路径安全 | `normalize_remote_path` / `parse_modelscope_repository_url` / 下载越界校验 | 防 `..` 穿越与非法链接 |
+| WebDAV 自定义树 | 命名虚拟根 + 文件夹 + source/target 挂载表；只读默认开启 | 同一源节点可重复组合，不复制远端数据；写操作仍回落到原仓库权限 |
+| 远端压缩浏览 | 7z/ZIP/ISO 稀疏首尾 Range，TAR 逐 512B 头跳转，GZ/XZ 单流元数据 | 不支持 RAR；不以“浏览”为名下载完整大包 |
 
 ## 4. 目录地图
 ```
 ModelScope-Manager/
 ├─ main.py                    入口：注入便携 site-packages → run()
-├─ modelscope_manager/        核心包（47 个模块）
-│  ├─ app.py                  应用初始化、run() 与旧版导入兼容层（约 14KB / 342 行）
+├─ modelscope_manager/        核心包（59 个 Python 模块）
+│  ├─ app.py                  应用初始化、run() 与旧版导入兼容层
 │  ├─ app_helpers.py          应用级常量、路径/大小/速度格式化等纯函数
 │  ├─ app_widgets.py          TransferChart、可拖放面包屑、仓库树/列表和拖放区
 │  ├─ app_workers.py          上传、下载、缩略图、删除、备份、图床与索引后台线程
@@ -47,13 +50,16 @@ ModelScope-Manager/
 │  ├─ page_shell.py           页面装配、导航注册与初始路由
 │  ├─ page_resource.py / page_transfer.py / page_settings.py
 │  ├─ page_search.py / page_backup.py / page_image_bed.py
-│  │                          六个导航页面的控件构建与信号连接
+│  ├─ page_about.py           Markdown 关于页：更新日志、开源库引用、支持者列表
+│  ├─ page_webdav_mapping.py  WebDAV 命名虚拟树页面、编辑行为与持久化
+│  │                          八个导航页面的控件构建与信号连接
 │  ├─ main_mixins.py          MainWindow 行为组合入口；app.py 只继承这一稳定入口
 │  ├─ main_accounts.py / main_backups.py / main_image_bed.py
 │  ├─ main_integrations.py / main_transfers.py / main_window_shell.py
 │  │                          账户、备份、图床、外部集成、传输及窗口生命周期行为
 │  ├─ main_repository_browser.py  仓库连接、目录浏览与资源视图
 │  ├─ main_repository_search.py   本地索引搜索与公共仓库搜索
+│  ├─ main_url_import.py          HTTP(S) 临时下载 → 当前仓库目录上传
 │  ├─ main_remote_actions.py      远端复制/移动/删除/播放与拖放上传
 │  ├─ service.py              SDK 适配层：ModelScopeService / WebService / MultiAccountService，
 │  │                          刻意保持 "GUI stays SDK-version agnostic"；含上传限速 monkey-patch
@@ -62,10 +68,13 @@ ModelScope-Manager/
 │  ├─ backup.py               备份任务：BackupJob / BackupStore（增量时间戳 / 同路径覆盖）
 │  ├─ folder_index.py         FolderSizeIndex：目录聚合大小索引
 │  ├─ webdav_server.py        ModelScopeWebDAV：纯 stdlib WebDAV 网关（AList V3 挂载）
+│  ├─ webdav_mapping.py       自定义映射数据模型、路径校验与 JSON 序列化
+│  ├─ remote_archive.py       7z/ZIP/TAR/ISO/GZ/XZ 远端 Range 目录探测
 │  ├─ web_session.py          网页登录会话：身份 / 读取 / 删除（DELETE_BATCH_SIZE=100）
 │  ├─ webview_login.py        Edge WebView2 登录子进程：私密会话、Cookie 捕获与 IPC
 │  ├─ media_proxy.py          AuthenticatedMediaProxy：私有媒体内存流转发鉴权
 │  ├─ player_installer.py     PotPlayer 可选安装：下载 7z → SHA-256 校验 → 7z-zstd 解压
+│  ├─ plugin_installer.py     FFmpeg 插件：固定 ModelScope 包、校验、原子替换与自检
 │  ├─ updater.py / main_updates.py  ModelScope 版本发现、下载校验、解压与退出后更新
 │  ├─ security.py             DPAPI protect / unprotect（Token 设备绑定）
 │  ├─ storage.py              路径常量 / DeviceIdentity / portable_settings（统一 data/ 目录）
@@ -100,6 +109,7 @@ ModelScope-Manager/
 | 传输列表 | 上传/下载二级栏；进度/速度/ETA；暂停/恢复/取消；统计 | `page_transfer.py` + `main_transfers.py` + `app_workers.py` |
 | 备份文件夹 | 多任务、增量/覆盖模式及云端同步回本地 | `page_backup.py` + `main_backups.py` + `backup.py` |
 | 图床 | 拖入/粘贴上传、AVIF 预转换、直链与本地记录 | `page_image_bed.py` + `main_image_bed.py` + `image_bed.py` + `avif_converter.py` |
+| WebDAV 映射 | 命名入口、虚拟文件夹、重复节点挂载与只读策略 | `page_webdav_mapping.py` + `webdav_mapping.py` + `webdav_server.py` |
 | 设置（底部固定） | 软件更新、账号、下载、播放、WebDAV、索引、外观与资源监控 | `page_settings.py` + `main_updates.py` + `main_accounts.py` + `main_integrations.py` + `main_window_shell.py` |
 | 托盘菜单 | WebDAV 状态、实时速度、显示主窗与退出 | `main_window_shell.py` |
 
@@ -122,7 +132,7 @@ ModelScope-Manager/
 | 文件 | 内容 | 谁写 |
 |---|---|---|
 | `manager.sqlite3` | ★账户元数据、DPAPI 加密 Token、仓库缓存、文件元数据、目录大小索引 | database.py |
-| `settings.ini` | QSettings 普通设置（主题/字号/语言/下载/播放/WebDAV/索引/AVIF 参数/资源回收阈值） | storage.py |
+| `settings.ini` | QSettings 普通设置（主题/字号/语言/下载/播放/WebDAV、自定义映射、可选文件列、索引/AVIF 参数/资源回收阈值） | storage.py / page_webdav_mapping.py |
 | `device.id` | 设备绑定标识（复制到别机 → 新 id → 清除 Token） | storage.py |
 | `public_pools.json` | 公共资源池（资源搜索加载过的公开仓库，重启恢复） | public_pools.py |
 
@@ -132,16 +142,16 @@ ModelScope-Manager/
 
 ## 8. 代码拆解（现状与维护边界）
 **现状体检**
-- 原 `app.py` 的 7521 行已拆为 21 个职责模块；当前入口约 342 行，最大拆分文件 `main_window_shell.py` 为 892 行，其余均低于 1000 行。
+- 原 `app.py` 的 7521 行已按页面与行为拆分；当前入口保持为初始化/兼容层。新增页面继续使用独立 `page_*.py`，不把行为回填到入口。
 - `app.py` 保留原有类、线程与辅助函数的导入兼容性；业务方法由 `main_mixins.py` 组合，外部调用方无需跟随内部路径迁移。
-- 原有 258 个非页面装配方法与 34 个辅助符号经过 AST 对比，拆分前后实现一致；页面装配按六个导航页切成独立构建器。
+- 页面装配按七个导航页切成独立构建器；设置仍固定在底部，WebDAV 映射为顶部第六页、皮肤编号 6。
 
 **依赖方向与维护纪律**
 1. `app.py` → `main_mixins.py` → `page_*.py` / `main_*.py` → `service/database/...`，禁止业务模块反向导入 `app.py`。
 2. 新页面控件放对应 `page_*.py`；页面行为放对应 `main_*.py`；长耗时任务放 `app_workers.py`；跨页控件放 `app_widgets.py`。
 3. 单个职责文件以 1000 行为警戒线；超过后按行为边界继续拆分，不按行数机械切割。
-4. `tests/test_app_structure.py` 固化入口行数、关键职责归属和文件上限，防止上帝文件回归。
-5. 已健康的 `service/database/download_service/webdav_server` 等业务层不因 UI 拆分而改动。
+4. 业务层扩展优先加小型数据模块（如 `webdav_mapping.py`），避免把序列化/校验塞进页面构建器。
+5. `service/database/download_service/webdav_server` 等业务层只接受可独立测试的能力扩展。
 
 ## 9. 更新与发布
 - **更新源**：公开数据集 `ARXChem/Software-List` 的 `ModelScope-Manager/<版本>.7z`；程序自动枚举并按数字版本选择最新版。
@@ -153,9 +163,9 @@ ModelScope-Manager/
   3. 本项目 Git 纪律：`runtime/`、`data/` 永不提交（.gitignore），`embedded-tools/` 随仓库。
 
 ## 10. 当前状态
-- **版本**：v1.0.7；已完成实验性凭据策略、大文件常规上传、路径栏定向拖放、资源多选、索引搜索和传输统计优化。
-- **发布**：GitHub Release `1.0.7`；ModelScope 更新资产为 `ModelScope-Manager/1.0.7.7z`。
-- **结构**：上帝文件拆分完成；`app.py` 为稳定兼容入口，21 个模块承载页面、行为、后台任务和共享控件。
+- **版本**：v1.0.8；已完成多皮肤、传输历史/恢复、Windows 直挂、自定义 WebDAV 虚拟树、下载冲突恢复和多格式 Range 浏览。
+- **发布目标**：GitHub Release `1.0.8`；ModelScope 更新资产为 `ModelScope-Manager/1.0.8.7z`。
+- **结构**：`app.py` 为稳定兼容入口；七个导航页分别构建，自定义映射的数据模型与网关解析保持独立。
 - **已知限制**（平台/设计约束，勿当 bug 修）：
   - Token 账户无法删除/移动/重命名（ModelScope 平台限制）→ 用网页会话。
   - 私有直链为 API 形式，仅对拥有仓库权限的访问者有效。

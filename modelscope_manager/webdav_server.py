@@ -19,6 +19,8 @@ from urllib.request import Request
 
 from .folder_index import FolderSizeIndex
 from .http_security import modelscope_token_headers, safe_urlopen
+from .public_pools import PublicMount
+from .webdav_mapping import WebDAVMapping, WebDAVMount
 from .service import (
     ModelScopeService,
     RemoteEntry,
@@ -40,6 +42,8 @@ class DavNode:
     repo: Repository | None = None
     remote_path: str = ""
     public: bool = False
+    source_path: str = ""
+    read_only: bool = False
 
 
 class ModelScopeWebDAV:
@@ -52,8 +56,9 @@ class ModelScopeWebDAV:
         port: int,
         username: str,
         password: str,
-        public_repositories_getter: Callable[[], list[Repository]] | None = None,
+        public_repositories_getter: Callable[[], list] | None = None,
         folder_index: FolderSizeIndex | None = None,
+        custom_mappings_getter: Callable[[], list[WebDAVMapping]] | None = None,
     ):
         self.service_getter = service_getter
         self.host = host
@@ -62,6 +67,7 @@ class ModelScopeWebDAV:
         self.password = password
         self.public_repositories_getter = public_repositories_getter or (lambda: [])
         self.folder_index = folder_index
+        self.custom_mappings_getter = custom_mappings_getter or (lambda: [])
         self.public_service = ModelScopeService("", require_token=False)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -134,12 +140,34 @@ class ModelScopeWebDAV:
             if cached and time.monotonic() - timestamp < 30:
                 return cached
             if public:
-                repos = self.public_repositories_getter()
+                values = self.public_repositories_getter()
+                repos = []
+                seen = set()
+                for value in values:
+                    repo = value.repo if isinstance(value, PublicMount) else value
+                    key = (repo.repo_type, repo.repo_id)
+                    if key not in seen:
+                        repos.append(repo)
+                        seen.add(key)
             else:
                 service = self._service(required=False)
                 repos = service.list_repositories() if service else []
             self._repos_cache[public] = (time.monotonic(), repos)
             return repos
+
+    def public_mounts(self) -> list[PublicMount]:
+        values = self.public_repositories_getter()
+        return [
+            value if isinstance(value, PublicMount) else PublicMount("", value, "")
+            for value in values
+        ]
+
+    def custom_mappings(self) -> list[WebDAVMapping]:
+        return list(self.custom_mappings_getter())
+
+    def _custom_mapping(self, root_name: str) -> WebDAVMapping | None:
+        key = root_name.casefold()
+        return next((item for item in self.custom_mappings() if item.name.casefold() == key), None)
 
     def entries(self, repo: Repository, public: bool = False) -> list[RemoteEntry]:
         key = (public, repo.repo_type, repo.repo_id)
@@ -194,6 +222,13 @@ class ModelScopeWebDAV:
     def resolve(self, raw_path: str) -> DavNode | None:
         path = self.clean_path(raw_path)
         parts = path.split("/") if path else []
+        mapping = self._custom_mapping(parts[0]) if parts else None
+        if mapping is not None:
+            return self._resolve_custom(path, mapping)
+        return self._resolve_builtin(path)
+
+    def _resolve_builtin(self, path: str) -> DavNode | None:
+        parts = path.split("/") if path else []
         if not parts:
             private = self.repositories(False)
             public_repos = self.repositories(True)
@@ -204,16 +239,17 @@ class ModelScopeWebDAV:
             repos = self.repositories(True)
             return DavNode(path, "public", True, self._repositories_size(repos, True), public=True)
         if public:
-            repo = next(
-                (candidate for candidate in self.repositories(True)
-                 if self.public_mount_name(candidate) == parts[1]),
+            mount = next(
+                (candidate for candidate in self.public_mounts()
+                 if candidate.mount_name == parts[1]),
                 None,
             )
-            if repo is None:
+            if mount is None:
                 return None
+            repo = mount.repo
             if len(parts) == 2:
-                return DavNode(path, parts[1], True, self._folder_size(repo, public=True), repo=repo, public=True)
-            remote = normalize_remote_path(*parts[2:])
+                return DavNode(path, parts[1], True, self._folder_size(repo, mount.root_path, True), repo=repo, remote_path=mount.root_path, public=True)
+            remote = normalize_remote_path(mount.root_path, *parts[2:])
             entries = self.entries(repo, True)
             by_path = {entry.path: entry for entry in entries}
             directories = repository_directories(by_path)
@@ -258,30 +294,80 @@ class ModelScopeWebDAV:
         size = self._folder_size(repo, remote) if is_dir else entry.size
         return DavNode(path, parts[-1], is_dir, size, repo, remote)
 
+    @staticmethod
+    def _aliased_node(node: DavNode, path: str, name: str, source_path: str, read_only: bool) -> DavNode:
+        return DavNode(
+            path, name, node.is_dir, node.size, node.repo, node.remote_path,
+            node.public, source_path, read_only,
+        )
+
+    def _custom_source_for(self, relative: str, mapping: WebDAVMapping) -> tuple[str, str] | None:
+        relative_parts = relative.split("/") if relative else []
+        candidates: list[tuple[WebDAVMount, list[str]]] = []
+        for mount in mapping.mounts:
+            target_parts = mount.target.split("/")
+            if len(relative_parts) < len(target_parts):
+                continue
+            if all(left.casefold() == right.casefold() for left, right in zip(relative_parts, target_parts)):
+                candidates.append((mount, relative_parts[len(target_parts):]))
+        if not candidates:
+            return None
+        mount, suffix_parts = max(candidates, key=lambda item: len(item[0].target.split("/")))
+        source = "/".join([mount.source, *suffix_parts])
+        return source, mount.target
+
+    def _resolve_custom(self, path: str, mapping: WebDAVMapping) -> DavNode | None:
+        parts = path.split("/")
+        relative = "/".join(parts[1:])
+        if not relative:
+            return DavNode(path, mapping.name, True, read_only=mapping.read_only)
+        translated = self._custom_source_for(relative, mapping)
+        if translated is not None:
+            source, _target = translated
+            source_node = self._resolve_builtin(source)
+            if source_node is not None:
+                return self._aliased_node(source_node, path, parts[-1], source, mapping.read_only)
+        virtual = next(
+            (candidate for candidate in mapping.virtual_directories() if candidate.casefold() == relative.casefold()),
+            None,
+        )
+        if virtual is not None:
+            return DavNode(path, virtual.rsplit("/", 1)[-1], True, read_only=mapping.read_only)
+        return None
+
     def children(self, node: DavNode) -> list[DavNode]:
         parts = node.path.split("/") if node.path else []
+        mapping = self._custom_mapping(parts[0]) if parts else None
+        if mapping is not None:
+            return self._custom_children(node, mapping)
         if not parts:
             private = self.repositories(False)
             models = [repo for repo in private if repo.repo_type == "model"]
             datasets = [repo for repo in private if repo.repo_type == "dataset"]
             public_repos = self.repositories(True)
-            return [
+            output = [
                 DavNode("models", "models", True, self._repositories_size(models)),
                 DavNode("datasets", "datasets", True, self._repositories_size(datasets)),
                 DavNode("public", "public", True, self._repositories_size(public_repos, True), public=True),
             ]
+            output.extend(
+                DavNode(item.name, item.name, True, read_only=item.read_only)
+                for item in sorted(self.custom_mappings(), key=lambda value: value.name.casefold())
+            )
+            return output
         public = parts[0] == "public"
         if public and len(parts) == 1:
             return [
                 DavNode(
-                    f"public/{self.public_mount_name(repo)}",
-                    self.public_mount_name(repo),
+                    f"public/{mount.mount_name}",
+                    mount.mount_name,
                     True,
-                    self._folder_size(repo, public=True),
-                    repo=repo,
+                    self._folder_size(mount.repo, mount.root_path, True),
+                    repo=mount.repo,
+                    remote_path=mount.root_path,
                     public=True,
                 )
-                for repo in sorted(self.repositories(True), key=lambda item: self.public_mount_name(item).lower())
+                for mount in sorted(self.public_mounts(), key=lambda item: item.mount_name.lower())
             ]
         if public:
             repo_node = node if node.repo else self.resolve("/" + "/".join(parts[:2]))
@@ -324,6 +410,68 @@ class ModelScopeWebDAV:
             return []
         return self._repository_children(node, repo_node.repo, False)
 
+    def _custom_children(self, node: DavNode, mapping: WebDAVMapping) -> list[DavNode]:
+        relative = "/".join(node.path.split("/")[1:])
+        output: dict[str, DavNode] = {}
+
+        translated = self._custom_source_for(relative, mapping) if relative else None
+        if translated is not None:
+            source, _target = translated
+            source_node = self._resolve_builtin(source)
+            if source_node is not None and source_node.is_dir:
+                for child in self.children(source_node):
+                    child_path = "/".join(part for part in (node.path, child.name) if part)
+                    child_source = "/".join(part for part in (source, child.name) if part)
+                    output[child.name.casefold()] = self._aliased_node(
+                        child, child_path, child.name, child_source, mapping.read_only,
+                    )
+
+        candidates = mapping.virtual_directories()
+        mount_by_target = {item.target: item for item in mapping.mounts}
+        relative_parts = relative.split("/") if relative else []
+        for candidate in sorted(candidates, key=str.casefold):
+            if not candidate:
+                continue
+            candidate_parts = candidate.split("/")
+            if len(candidate_parts) <= len(relative_parts):
+                continue
+            if any(
+                left.casefold() != right.casefold()
+                for left, right in zip(candidate_parts, relative_parts)
+            ):
+                continue
+            tail_parts = candidate_parts[len(relative_parts):]
+            if len(tail_parts) != 1:
+                continue
+            tail = tail_parts[0]
+            custom_path = "/".join((mapping.name, candidate))
+            mount = mount_by_target.get(candidate)
+            if mount is not None:
+                source_node = self._resolve_builtin(mount.source)
+                if source_node is None:
+                    continue
+                result = self._aliased_node(
+                    source_node, custom_path, tail, mount.source, mapping.read_only,
+                )
+            else:
+                result = DavNode(custom_path, tail, True, read_only=mapping.read_only)
+            # Explicit virtual folders/mounts win over same-name source children.
+            output[tail.casefold()] = result
+        return sorted(output.values(), key=lambda value: value.name.casefold())
+
+    def _translate_custom_write(self, clean: str) -> str:
+        parts = clean.split("/") if clean else []
+        mapping = self._custom_mapping(parts[0]) if parts else None
+        if mapping is None:
+            return clean
+        if mapping.read_only:
+            raise PermissionError("Custom WebDAV mapping is read-only")
+        relative = "/".join(parts[1:])
+        translated = self._custom_source_for(relative, mapping)
+        if translated is None:
+            raise PermissionError("Files can only be written inside a mounted directory")
+        return translated[0]
+
     def _repository_children(self, node: DavNode, repo: Repository, public: bool) -> list[DavNode]:
         prefix = node.remote_path.strip("/")
         entries = self.entries(repo, public)
@@ -356,7 +504,7 @@ class ModelScopeWebDAV:
         return output
 
     def make_collection(self, path: str) -> None:
-        clean = self.clean_path(path)
+        clean = self._translate_custom_write(self.clean_path(path))
         parts = clean.split("/")
         if not parts or parts[0] == "public":
             raise PermissionError("Public pools are read-only")
@@ -370,7 +518,7 @@ class ModelScopeWebDAV:
             self._virtual_dirs.add((repo_node.repo.repo_type, repo_node.repo.repo_id, remote_path))
 
     def upload(self, path: str, stream, length: int) -> bool:
-        clean = self.clean_path(path)
+        clean = self._translate_custom_write(self.clean_path(path))
         parts = clean.split("/")
         if not parts or parts[0] == "public":
             raise PermissionError("Public pools are read-only")
@@ -511,11 +659,36 @@ class _WebDAVHandler(BaseHTTPRequestHandler):
                 return
             service = self.manager._service(public=node.public)
             download_url = service.get_download_url(node.repo, node.remote_path)
-            headers = modelscope_token_headers(download_url, service.token, include_session_cookie=True)
-            if self.headers.get("Range"):
-                headers["Range"] = self.headers["Range"]
-            request = Request(download_url, headers=headers)
+            get_headers = getattr(service, "get_download_headers", None)
+            headers = get_headers(node.repo, download_url) if get_headers else modelscope_token_headers(
+                download_url, service.token, include_session_cookie=True,
+            )
+            # Resolve ModelScope's object-storage redirect using only a single
+            # byte.  AList then downloads from the signed URL directly instead
+            # of routing every byte through this Python WebDAV gateway.
+            client_range = self.headers.get("Range")
+            headers["Range"] = client_range or "bytes=0-0"
+            request = Request(download_url, headers=headers, method="GET")
             response = safe_urlopen(request, timeout=30)
+            direct_url = response.geturl()
+            has_credentials = any(name in headers for name in ("Authorization", "Cookie"))
+            if direct_url != download_url or not has_credentials:
+                response.close()
+                self.send_response(302)
+                self.send_header("Location", direct_url)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            if not client_range:
+                # Defensive fallback for an authenticated endpoint that serves
+                # bytes itself instead of redirecting to object storage.
+                response.close()
+                headers.pop("Range", None)
+                method = "HEAD" if head_only else "GET"
+                response = safe_urlopen(Request(download_url, headers=headers, method=method), timeout=30)
             status = getattr(response, "status", 200)
             self.send_response(status)
             for name in ("Content-Length", "Content-Type", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"):
